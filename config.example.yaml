@@ -52,6 +52,8 @@ terminology:
   embedding_model: sentence-transformers/all-MiniLM-L6-v2
   similarity_threshold: 0.85
   max_terms_per_document: 500
+  # Use LLM to auto-translate extracted terms (efficient: only sends term list, not full document)
+  use_llm_translation: true
 
 # Processing pipeline settings
 processing:

@@ -151,6 +151,8 @@ class TerminologyConfig(BaseModel):
     embedding_model: str = Field(default="sentence-transformers/all-MiniLM-L6-v2")
     similarity_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     max_terms_per_document: int = Field(default=500, ge=10, le=5000)
+    # Use LLM to translate extracted terms (token-efficient: only sends term list)
+    use_llm_translation: bool = Field(default=True)
 
 
 class LoggingConfig(BaseModel):
@@ -333,6 +335,8 @@ terminology:
   embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
   # Similarity threshold for term clustering
   similarity_threshold: 0.85
+  # Use LLM to auto-translate extracted terms (efficient: only sends term list)
+  use_llm_translation: true
 
 processing:
   # Mode: "auto" or "semi-auto"

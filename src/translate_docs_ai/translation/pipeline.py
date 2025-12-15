@@ -22,7 +22,7 @@ from translate_docs_ai.config import ProcessingMode
 from translate_docs_ai.database import Database, Page, Stage, Status
 from translate_docs_ai.memory import DuckDBStore
 from translate_docs_ai.ocr import DeepInfraOCR, PyMuPDFExtractor
-from translate_docs_ai.terminology import TerminologyExtractor
+from translate_docs_ai.terminology import LLMTerminologyExtractor, TerminologyExtractor
 from translate_docs_ai.terminology.embeddings import EmbeddingGenerator
 from translate_docs_ai.translation.search_tools import TerminologySearchTools
 from translate_docs_ai.translation.translator import PageTranslator
@@ -182,7 +182,16 @@ class TranslationPipeline:
             self.deepinfra_ocr = None
             self.deepinfra_fallback = None
 
-        # Terminology
+        # LLM-based Terminology Extractor (primary)
+        self.llm_term_extractor: LLMTerminologyExtractor | None = None
+        if self.config.openrouter_api_key:
+            self.llm_term_extractor = LLMTerminologyExtractor(
+                api_key=self.config.openrouter_api_key,
+                db=self.db,
+                model=self.config.translation_model,
+            )
+
+        # Frequency-based Terminology Extractor (fallback)
         self.term_extractor = TerminologyExtractor(
             db=self.db,
             min_frequency=self.config.min_term_frequency,
@@ -252,13 +261,13 @@ class TranslationPipeline:
             },
         )
 
-        # Review can go to translation or back to review
+        # Review can go to translation or END (waiting for approval)
         workflow.add_conditional_edges(
             "review",
             self._route_after_review,
             {
                 "translation": "translation",
-                "review": "review",  # Wait for approval
+                "end": END,  # Pause and wait for user approval
             },
         )
 
@@ -298,7 +307,7 @@ class TranslationPipeline:
         """Route after review stage."""
         if state["review_approved"]:
             return "translation"
-        return "review"
+        return "end"  # Pause pipeline until user approves
 
     async def _node_init(self, state: PipelineState) -> dict[str, Any]:
         """Initialize pipeline for a document."""
@@ -457,8 +466,15 @@ class TranslationPipeline:
             }
 
     async def _node_terminology(self, state: PipelineState) -> dict[str, Any]:
-        """Extract and process terminology."""
+        """Extract and process terminology using hybrid approach.
+
+        Strategy (token-efficient):
+        1. Use frequency-based extraction to identify candidate terms (no LLM cost)
+        2. Generate embeddings for semantic deduplication (local model)
+        3. Use LLM only for translating the top filtered terms (minimal tokens)
+        """
         document_id = state["document_id"]
+        target_lang = state["target_lang"]
 
         # Report terminology extraction start
         self._report_progress(
@@ -467,10 +483,17 @@ class TranslationPipeline:
         )
 
         try:
-            # Extract terms
+            # Step 1: Frequency-based extraction (fast, no API cost)
             terms = self.term_extractor.extract_from_document(document_id)
 
-            # Generate embeddings for semantic search (if enabled)
+            self.db.log(
+                level="INFO",
+                stage="terminology",
+                message=f"Frequency extraction found {len(terms)} candidate terms",
+                document_id=document_id,
+            )
+
+            # Step 2: Generate embeddings for semantic search/deduplication
             embeddings_generated = 0
             if self.embedding_generator and terms:
                 try:
@@ -482,11 +505,38 @@ class TranslationPipeline:
                     self.search_tools.initialize_search()
                     self.db.create_terminology_vss_index()
                 except Exception as e:
-                    # Log but don't fail - embeddings are optional
                     self.db.log(
                         level="WARNING",
                         stage="terminology",
                         message=f"Failed to generate embeddings: {e}",
+                        document_id=document_id,
+                    )
+
+            # Step 3: Use LLM to translate terms (only if we have an LLM extractor)
+            # This is token-efficient: we only send term list, not full document
+            terms_translated = 0
+            if self.llm_term_extractor and terms:
+                try:
+                    self._report_progress(
+                        stage="terminology",
+                        stage_display="Translating terms with LLM",
+                        detail=f"{len(terms)} terms to translate",
+                    )
+                    terms_translated = await self.llm_term_extractor.translate_terms(
+                        document_id=document_id,
+                        target_lang=target_lang,
+                    )
+                    self.db.log(
+                        level="INFO",
+                        stage="terminology",
+                        message=f"LLM translated {terms_translated} terms",
+                        document_id=document_id,
+                    )
+                except Exception as e:
+                    self.db.log(
+                        level="WARNING",
+                        stage="terminology",
+                        message=f"LLM term translation failed: {e}",
                         document_id=document_id,
                     )
 
@@ -497,6 +547,7 @@ class TranslationPipeline:
                 state_data={
                     "terms_count": len(terms),
                     "embeddings_generated": embeddings_generated,
+                    "terms_translated": terms_translated,
                 },
             )
 
@@ -504,7 +555,7 @@ class TranslationPipeline:
             self.db.log(
                 level="INFO",
                 stage="terminology",
-                message=f"Extracted {len(terms)} terms, generated {embeddings_generated} embeddings",
+                message=f"Extracted {len(terms)} terms, {embeddings_generated} embeddings, {terms_translated} translations",
                 document_id=document_id,
             )
 
@@ -512,7 +563,7 @@ class TranslationPipeline:
             self._report_progress(
                 stage="terminology",
                 stage_display="Terminology extracted",
-                detail=f"{len(terms)} terms found",
+                detail=f"{len(terms)} terms, {terms_translated} translated",
             )
 
             return {
@@ -563,12 +614,22 @@ class TranslationPipeline:
         self.db.log(
             level="INFO",
             stage="review",
-            message="Awaiting terminology review",
+            message="Awaiting terminology review - run 'translate-docs approve' to continue",
             document_id=document_id,
         )
 
-        # Return without changing stage - will be called again when approved
-        return {"needs_review": True}
+        # Report progress that we're awaiting review
+        self._report_progress(
+            stage="review",
+            stage_display="Awaiting terminology review",
+            detail="Use 'translate-docs approve' to continue",
+        )
+
+        # Return with review stage - pipeline will END and wait for user approval
+        return {
+            "current_stage": PipelineStage.REVIEW,
+            "needs_review": True,
+        }
 
     async def _node_translation(self, state: PipelineState) -> dict[str, Any]:
         """Translate document pages."""

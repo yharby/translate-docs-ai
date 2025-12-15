@@ -5,8 +5,9 @@ AI-powered document translation pipeline with OCR, terminology extraction, and m
 ## Features
 
 - **Smart OCR**: Uses olmOCR-2 via DeepInfra for accurate text extraction from PDFs
-- **Terminology Extraction**: Automatic extraction of technical terms with frequency analysis
+- **Smart Terminology Extraction**: Hybrid approach combining frequency analysis with LLM-powered context-aware translation
 - **Context-Aware Translation**: Page-by-page translation with previous/next page context via OpenRouter LLMs
+- **Semi-Auto Mode**: Pause for terminology review with CSV export/import workflow
 - **RTL/LTR Support**: Automatic table column reversal when translating between RTL (Arabic, Hebrew) and LTR (English) languages
 - **Multi-Format Export**: Export to Markdown, PDF, and DOCX
 - **Progress Tracking**: Rich CLI with progress bars and status displays
@@ -113,15 +114,33 @@ uv run translate-docs export --format pdf --language en
 uv run translate-docs export --format docx --language en
 ```
 
-### Semi-Auto Mode (with human review)
+### Semi-Auto Mode (Terminology Review Workflow)
+
+Semi-auto mode pauses after terminology extraction, exports terms to CSV for review, and waits for approval before continuing translation.
 
 ```bash
-# Run with review checkpoints
-uv run translate-docs translate --all --mode semi-auto
+# 1. Start translation in semi-auto mode
+uv run translate-docs translate --all --mode semi-auto --source ar --target en
+# → Extracts terms, auto-translates them using LLM with context
+# → Exports CSV to ./translated/terms_*.csv
+# → Pauses and shows instructions
 
-# Review and approve terminology
-uv run translate-docs approve --doc 1
+# 2. Review the CSV file
+# - Open ./translated/terms_*.csv in a spreadsheet
+# - Review: original_term_ar, auto_translation_en columns
+# - Fill corrected_translation_en column where needed
+# - Leave empty to approve auto-translation as-is
+
+# 3. Import reviewed terms and continue
+uv run translate-docs approve --doc 1 --import ./translated/terms_*.csv
+# → Imports corrections, continues translation, exports results
 ```
+
+**CSV Format:**
+| term_id | original_term_ar | frequency | auto_translation_en | corrected_translation_en |
+|---------|------------------|-----------|---------------------|--------------------------|
+| 1 | الهيئة العامة | 17 | General Authority | |
+| 2 | الجيومكانية | 15 | Geospatial | Geomatics |
 
 ## CLI Commands
 
@@ -130,10 +149,12 @@ uv run translate-docs approve --doc 1
 | `run <config.yaml>` | Run full pipeline with config file |
 | `scan <directory>` | Scan and catalog documents |
 | `status` | Show processing status |
-| `translate` | Translate documents |
+| `translate` | Translate documents (supports `--mode semi-auto`) |
+| `terms --doc N --export` | Export terminology to CSV for review |
+| `approve --doc N --import <csv>` | Import reviewed terms and continue |
 | `export` | Export translations to MD/PDF/DOCX |
-| `approve` | Approve documents in semi-auto mode |
 | `logs` | View processing logs |
+| `init` | Generate default config.yaml |
 
 ## Architecture
 
@@ -169,6 +190,32 @@ uv run translate-docs approve --doc 1
 - **Pipeline**: LangGraph for stateful, checkpointable workflows
 - **Export**: Markdown, PDF (markdown-pdf), DOCX (python-docx)
 
+## Smart Terminology Extraction
+
+The terminology extraction uses a **hybrid token-efficient approach**:
+
+1. **Frequency-based extraction** (no API cost)
+   - Identifies candidate terms using n-gram frequency analysis
+   - Filters common words with stop word lists
+   - Stores context snippets where each term appears
+
+2. **LLM-powered context-aware translation** (minimal tokens)
+   - Only sends the term list with context to the LLM (not full document)
+   - Uses sentence context to determine correct translation
+   - Example: "bank" with context "river bank" translates correctly
+
+3. **Embeddings for semantic search** (local model)
+   - Generates embeddings using sentence-transformers
+   - Enables semantic similarity search for term lookup
+
+**Configuration:**
+```yaml
+terminology:
+  min_frequency: 3              # Minimum occurrences to extract
+  use_llm_translation: true     # Enable LLM-powered translation
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+```
+
 ## RTL/LTR Table Handling
 
 When translating between right-to-left and left-to-right languages, tables are automatically handled:
@@ -191,7 +238,8 @@ translate-docs-ai/
          deepinfra.py    # olmOCR via DeepInfra
          pymupdf.py      # Native PDF extraction
       terminology/
-         extractor.py    # Term extraction
+         extractor.py    # Frequency-based term extraction
+         llm_extractor.py # LLM-powered context-aware translation
          embeddings.py   # Vector embeddings
       translation/
          pipeline.py     # LangGraph workflow

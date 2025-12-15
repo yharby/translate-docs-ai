@@ -251,8 +251,19 @@ def terms(
     config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
     extract_new: bool = typer.Option(False, "--extract", "-e", help="Extract terminology"),
     show_all: bool = typer.Option(False, "--all", "-a", help="Show all terms"),
+    export_csv: Path | None = typer.Option(None, "--export", help="Export terms to CSV for review"),
+    import_csv: Path | None = typer.Option(None, "--import", help="Import reviewed terms from CSV"),
 ) -> None:
-    """Manage terminology for a document."""
+    """Manage terminology for a document.
+
+    Workflow for semi-auto terminology review:
+    1. Run 'translate-docs translate --doc N --mode semi-auto' to extract terms
+    2. Run 'translate-docs terms --doc N --export' to export CSV for review
+    3. Edit the CSV file (fill corrected_translation column where needed)
+    4. Run 'translate-docs approve --doc N --import terms_doc_N.csv' to continue
+    """
+    import csv
+
     settings = get_settings(config)
     db = get_database(settings)
 
@@ -275,6 +286,120 @@ def terms(
 
         console.print(f"[green]Extracted {len(terms_list)} terms[/green]")
 
+    # Export to CSV for review
+    if export_csv is not None:
+        terms_list = db.get_document_terms(document_id)
+        if not terms_list:
+            console.print("[yellow]No terms to export[/yellow]")
+            raise typer.Exit(1)
+
+        # Determine source/target columns based on config
+        source_lang = settings.translation.source_language
+        target_lang = settings.translation.target_language
+
+        # Determine export path - use output_dir if no path specified or if just --export flag
+        if export_csv == Path("."):
+            # --export was used without a path, use default in output directory
+            output_dir = settings.paths.output_dir
+            output_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = "".join(
+                c if c.isalnum() or c in "._- " else "_" for c in Path(doc.file_name).stem
+            )
+            export_path = output_dir / f"terms_{safe_name}_doc{document_id}.csv"
+        else:
+            export_path = export_csv
+
+        with open(export_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            # Header: term_id, original_term, frequency, auto_translation, corrected_translation
+            writer.writerow(
+                [
+                    "term_id",
+                    f"original_term_{source_lang}",
+                    "frequency",
+                    f"auto_translation_{target_lang}",
+                    f"corrected_translation_{target_lang}",
+                ]
+            )
+
+            for term in terms_list:
+                # Get the auto-translation based on target language
+                auto_trans = getattr(term, f"translation_{target_lang}", "") or ""
+                writer.writerow(
+                    [
+                        term.id,
+                        term.term,
+                        term.frequency,
+                        auto_trans,
+                        "",  # Empty column for corrections
+                    ]
+                )
+
+        # Show clear instructions
+        console.print()
+        console.print(
+            Panel(
+                f"[green]✓ Exported {len(terms_list)} terms[/green]\n\n"
+                f"[bold]CSV file:[/bold] [cyan]{export_path.absolute()}[/cyan]\n\n"
+                "[bold]Instructions:[/bold]\n"
+                "1. Open the CSV file in a spreadsheet editor\n"
+                f"2. Review the '{source_lang}' terms and their auto-translations\n"
+                f"3. Fill '[bold]corrected_translation_{target_lang}[/bold]' column where needed\n"
+                "4. Leave the correction column empty to approve auto-translation as-is\n"
+                "5. Save the CSV file\n\n"
+                f"[bold]Then run:[/bold]\n"
+                f"  [cyan]translate-docs approve --doc {document_id} --import {export_path}[/cyan]",
+                title="[bold blue]Terminology Review[/bold blue]",
+                border_style="blue",
+            )
+        )
+        return
+
+    # Import from CSV
+    if import_csv:
+        if not import_csv.exists():
+            console.print(f"[red]CSV file not found: {import_csv}[/red]")
+            raise typer.Exit(1)
+
+        target_lang = settings.translation.target_language
+        updated = 0
+        approved = 0
+
+        with open(import_csv, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                term_id = int(row["term_id"])
+                corrected = row.get(f"corrected_translation_{target_lang}", "").strip()
+
+                # Get current term
+                term = db.conn.execute(
+                    "SELECT * FROM terminology WHERE id = ?", [term_id]
+                ).fetchone()
+
+                if not term:
+                    continue
+
+                # Update translation if corrected, otherwise mark as approved
+                if corrected:
+                    # User provided a correction
+                    db.conn.execute(
+                        f"UPDATE terminology SET translation_{target_lang} = ?, approved = TRUE WHERE id = ?",
+                        [corrected, term_id],
+                    )
+                    updated += 1
+                else:
+                    # No correction = approve auto-translation as-is
+                    db.conn.execute(
+                        "UPDATE terminology SET approved = TRUE WHERE id = ?",
+                        [term_id],
+                    )
+                approved += 1
+
+        console.print(
+            f"[green]Imported terminology: {approved} approved, {updated} corrected[/green]"
+        )
+        return
+
     # Display terms
     terms_list = db.get_document_terms(document_id)
 
@@ -291,18 +416,22 @@ def terms(
     display_terms = terms_list if show_all else terms_list[:30]
 
     for term in display_terms:
-        approved = "[green]✓[/green]" if term.approved else ""
+        approved_mark = "[green]✓[/green]" if term.approved else ""
         table.add_row(
             term.term[:30],
             str(term.frequency),
             (term.translation_ar or "")[:30],
-            approved,
+            approved_mark,
         )
 
     console.print(table)
 
     if len(terms_list) > 30 and not show_all:
         console.print(f"[dim]Showing 30 of {len(terms_list)} terms. Use --all to see all.[/dim]")
+
+    console.print(
+        f"\n[dim]To review terms: translate-docs terms --doc {document_id} --export terms.csv[/dim]"
+    )
 
 
 @app.command()
@@ -485,8 +614,57 @@ def translate(
                             )
                         )
                     elif state["current_stage"].value == "review":
-                        console.print(f"[yellow]⏸ Awaiting review: {doc.file_name}[/yellow]")
-                        console.print(f"Run 'translate-docs approve --doc {doc.id}' to continue")
+                        # Auto-export terms to CSV for review
+                        terms_count = state.get("terms_extracted", 0)
+                        output_dir = settings.paths.output_dir
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        safe_name = "".join(
+                            c if c.isalnum() or c in "._- " else "_"
+                            for c in Path(doc.file_name).stem
+                        )
+                        csv_path = output_dir / f"terms_{safe_name}_doc{doc.id}.csv"
+
+                        # Export terms to CSV
+                        import csv as csv_module
+
+                        terms_list = db.get_document_terms(doc.id)
+                        if terms_list:
+                            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                                writer = csv_module.writer(f)
+                                writer.writerow(
+                                    [
+                                        "term_id",
+                                        f"original_term_{source_lang}",
+                                        "frequency",
+                                        f"auto_translation_{target_lang}",
+                                        f"corrected_translation_{target_lang}",
+                                    ]
+                                )
+                                for term in terms_list:
+                                    auto_trans = (
+                                        getattr(term, f"translation_{target_lang}", "") or ""
+                                    )
+                                    writer.writerow(
+                                        [term.id, term.term, term.frequency, auto_trans, ""]
+                                    )
+
+                        console.print(
+                            Panel(
+                                f"[yellow]⏸ Awaiting terminology review[/yellow]\n\n"
+                                f"[bold]Document:[/bold] {doc.file_name}\n"
+                                f"[bold]Terms extracted:[/bold] {terms_count}\n\n"
+                                f"[bold]CSV file:[/bold] [cyan]{csv_path.absolute()}[/cyan]\n\n"
+                                "[bold]Instructions:[/bold]\n"
+                                f"1. Open the CSV file and review the {source_lang} terms\n"
+                                f"2. Fill 'corrected_translation_{target_lang}' column where needed\n"
+                                "3. Leave empty to approve auto-translation as-is\n"
+                                "4. Save the file\n\n"
+                                f"[bold]Then run:[/bold]\n"
+                                f"  [cyan]translate-docs approve --doc {doc.id} --import {csv_path}[/cyan]",
+                                title="[bold blue]Terminology Review Required[/bold blue]",
+                                border_style="yellow",
+                            )
+                        )
                     else:
                         console.print(f"[red]✗ Failed: {doc.file_name}[/red]")
                         for error in state.get("errors", []):
@@ -505,8 +683,20 @@ def translate(
 def approve(
     document_id: int = typer.Option(..., "--doc", "-d", help="Document ID"),
     config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+    import_csv: Path | None = typer.Option(
+        None, "--import", "-i", help="Import reviewed terms from CSV before approving"
+    ),
 ) -> None:
-    """Approve terminology review and continue translation."""
+    """Approve terminology review and continue translation.
+
+    Workflow:
+    1. Run 'translate-docs translate --doc N --mode semi-auto' to OCR and extract terms
+    2. Run 'translate-docs terms --doc N --export terms.csv' to export for review
+    3. Edit CSV: fill 'corrected_translation' column where needed (leave empty to approve as-is)
+    4. Run 'translate-docs approve --doc N --import terms.csv' to import and continue
+    """
+    import csv
+
     settings = get_settings(config)
     db = get_database(settings)
 
@@ -515,11 +705,69 @@ def approve(
         console.print(f"[red]Document {document_id} not found[/red]")
         raise typer.Exit(1)
 
+    # Import CSV if provided
+    if import_csv:
+        if not import_csv.exists():
+            console.print(f"[red]CSV file not found: {import_csv}[/red]")
+            raise typer.Exit(1)
+
+        target_lang = settings.translation.target_language
+        updated = 0
+        approved = 0
+
+        with open(import_csv, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                term_id = int(row["term_id"])
+                corrected = row.get(f"corrected_translation_{target_lang}", "").strip()
+
+                # Get current term
+                term = db.conn.execute(
+                    "SELECT * FROM terminology WHERE id = ?", [term_id]
+                ).fetchone()
+
+                if not term:
+                    continue
+
+                # Update translation if corrected, otherwise mark as approved
+                if corrected:
+                    db.conn.execute(
+                        f"UPDATE terminology SET translation_{target_lang} = ?, approved = TRUE WHERE id = ?",
+                        [corrected, term_id],
+                    )
+                    updated += 1
+                else:
+                    db.conn.execute(
+                        "UPDATE terminology SET approved = TRUE WHERE id = ?",
+                        [term_id],
+                    )
+                approved += 1
+
+        console.print(
+            f"[green]Imported: {approved} terms approved, {updated} corrections applied[/green]"
+        )
+
     from translate_docs_ai.translation.pipeline import PipelineConfig, TranslationPipeline
+
+    # Map OCR model names
+    def map_ocr_model(model_name: str) -> str:
+        model_map = {
+            "deepseek-ai/DeepSeek-OCR": "deepseek",
+            "allenai/olmOCR-2-7B-1025": "olmocr",
+            "pymupdf4llm": "pymupdf",
+        }
+        return model_map.get(model_name, model_name)
 
     pipeline_config = PipelineConfig(
         openrouter_api_key=settings.translation.openrouter_api_key,
         deepinfra_api_key=settings.ocr.deepinfra_api_key,
+        source_lang=settings.translation.source_language,
+        target_lang=settings.translation.target_language,
+        translation_model=settings.translation.default_model,
+        ocr_dpi=settings.ocr.image_dpi,
+        force_ocr=settings.ocr.force_ocr,
+        ocr_primary_model=map_ocr_model(settings.ocr.primary_model.value),
+        ocr_fallback_model=map_ocr_model(settings.ocr.fallback_model.value),
     )
 
     pipeline = TranslationPipeline(db, pipeline_config)
@@ -527,12 +775,14 @@ def approve(
     async def approve_and_continue():
         await pipeline.approve_review(document_id)
         console.print(f"[green]Review approved for document {document_id}[/green]")
+        console.print("[cyan]Continuing translation...[/cyan]\n")
 
         # Continue processing
         state = await pipeline.process_document(document_id, resume=True)
 
         if state["current_stage"].value == "complete":
-            console.print("[green]✓ Translation completed[/green]")
+            pages_translated = state.get("pages_translated", 0)
+            console.print(f"[green]✓ Translation completed: {pages_translated} pages[/green]")
         else:
             stage = state["current_stage"].value
             console.print(f"[yellow]Current stage: {stage}[/yellow]")
@@ -649,11 +899,23 @@ translation:
   max_terms: 500
   # openrouter_api_key: ${OPENROUTER_API_KEY}
 
+# Terminology extraction settings
+terminology:
+  min_frequency: 3                    # Minimum occurrences to extract a term
+  use_llm_translation: true           # Use LLM to auto-translate terms
+
 # Processing mode: auto or semi_auto
 processing:
-  mode: auto
+  mode: auto                          # 'auto' or 'semi-auto' (pauses for terminology review)
   concurrent_pages: 1
   max_retries: 3
+
+# Export settings
+export:
+  markdown: true
+  pdf: true
+  docx: true
+  auto_export: true                   # Auto-export after translation completes
 
 # Logging
 logging:
