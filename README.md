@@ -15,12 +15,35 @@ AI-powered document translation pipeline with OCR, terminology extraction, and m
 
 ## Installation
 
+### Quick Install (Recommended)
+
+Install globally with uv tool - no cloning needed:
+
+```bash
+# Install permanently as a CLI tool
+uv tool install translate-docs-ai --from git+https://github.com/yharby/translate-docs-ai.git
+
+# Now use it from anywhere
+translate-docs --help
+translate-docs run config.yaml
+```
+
+### One-Time Run (No Install)
+
+Run directly without installing:
+
+```bash
+uvx --from git+https://github.com/yharby/translate-docs-ai.git translate-docs --help
+```
+
+### Development Installation
+
 ```bash
 # Clone the repository
 git clone https://github.com/yharby/translate-docs-ai.git
 cd translate-docs-ai
 
-# Install with uv (recommended)
+# Install with uv
 uv sync
 
 # Or with pip
