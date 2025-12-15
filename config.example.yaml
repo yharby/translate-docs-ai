@@ -36,7 +36,7 @@ translation:
   temperature: 0.3
   max_tokens_per_request: 8192
   min_term_frequency: 3
-  max_terms: 500
+  max_terms: 200
   # API key for OpenRouter
   openrouter_api_key: ${OPENROUTER_API_KEY}
 
@@ -59,7 +59,7 @@ terminology:
 processing:
   # Mode: "auto" (fully automated) or "semi-auto" (pause for terminology review)
   # semi-auto pauses after term extraction, exports CSV, waits for approval
-  mode: auto  # Change to "semi-auto" for terminology review workflow
+  mode: auto # Change to "semi-auto" for terminology review workflow
   batch_size: 10
   max_retries: 3
   retry_delay: 5.0
@@ -68,10 +68,10 @@ processing:
   # Semi-auto mode settings (only used when mode: semi-auto)
   # Review CSVs are automatically saved to <output_dir>/review/
   semi_auto:
-    review_terminology: true          # Pause for terminology review
-    review_term_translations: true    # Include auto-translations in CSV
-    review_page_translations: false   # Don't pause for each page translation
-    export_terminology_csv: true      # Auto-export CSV when pausing
+    review_terminology: true # Pause for terminology review
+    review_term_translations: true # Include auto-translations in CSV
+    review_page_translations: false # Don't pause for each page translation
+    export_terminology_csv: true # Auto-export CSV when pausing
 
   # Auto mode settings
   auto:

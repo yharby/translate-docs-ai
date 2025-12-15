@@ -117,7 +117,7 @@ class PipelineConfig:
 
     # Terminology options
     min_term_frequency: int = 3
-    max_terms: int = 500
+    max_terms: int = 200
 
     # Embedding options
     enable_embeddings: bool = True  # Generate embeddings for terminology

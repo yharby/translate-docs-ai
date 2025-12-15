@@ -291,16 +291,19 @@ Text to analyze:
         self,
         document_id: int,
         target_lang: str = "en",
+        batch_size: int = 50,
     ) -> int:
         """
         Generate context-aware translations for terms.
 
         Uses the sentence/context where each term appears to provide
         more accurate translations based on how the term is used.
+        Processes terms in batches to handle large term lists.
 
         Args:
             document_id: Document ID.
             target_lang: Target language for translation.
+            batch_size: Number of terms to translate per LLM call.
 
         Returns:
             Number of terms translated.
@@ -321,18 +324,23 @@ Text to analyze:
         }
         target_name = lang_names.get(target_lang, target_lang)
 
-        # Build terms with context for better translation
-        # Include the context snippet stored with each term
-        terms_with_context = []
-        for t in terms_to_translate[:100]:
-            if t.context:
-                terms_with_context.append(f'- Term: "{t.term}"\n  Context: "{t.context}"')
-            else:
-                terms_with_context.append(f'- Term: "{t.term}"')
+        total_translated = 0
 
-        terms_text = "\n".join(terms_with_context)
+        # Process terms in batches
+        for i in range(0, len(terms_to_translate), batch_size):
+            batch = terms_to_translate[i : i + batch_size]
 
-        system_prompt = f"""You are an expert translator specializing in technical and domain-specific terminology.
+            # Build terms with context for better translation
+            terms_with_context = []
+            for t in batch:
+                if t.context:
+                    terms_with_context.append(f'- Term: "{t.term}"\n  Context: "{t.context}"')
+                else:
+                    terms_with_context.append(f'- Term: "{t.term}"')
+
+            terms_text = "\n".join(terms_with_context)
+
+            system_prompt = f"""You are an expert translator specializing in technical and domain-specific terminology.
 
 Your task is to translate terms from their source language to {target_name}.
 
@@ -349,62 +357,62 @@ For example:
 Return ONLY a valid JSON object mapping each original term to its best translation.
 Do not include explanations, just the JSON."""
 
-        user_prompt = f"""Translate these terms to {target_name}, using the context to determine the correct translation:
+            user_prompt = f"""Translate these terms to {target_name}, using the context to determine the correct translation:
 
 {terms_text}
 
 Return format:
 {{"term1": "translation1", "term2": "translation2"}}"""
 
-        try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=4000,
-            )
-
-            content = response.choices[0].message.content or "{}"
-
-            # Parse response
-            content = content.strip()
-            if content.startswith("```"):
-                lines = content.split("\n")
-                content = "\n".join(lines[1:-1]) if len(lines) > 2 else "{}"
-
             try:
-                translations = json.loads(content)
-            except json.JSONDecodeError:
-                # Try to extract JSON object from response
-                import re
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=4000,
+                )
 
-                json_match = re.search(r"\{.*\}", content, re.DOTALL)
-                if json_match:
-                    translations = json.loads(json_match.group())
-                else:
-                    translations = {}
+                content = response.choices[0].message.content or "{}"
 
-            # Update terms in database
-            translated_count = 0
-            for term in terms_to_translate:
-                if term.term in translations:
-                    translation = translations[term.term]
-                    self.db.conn.execute(
-                        f"UPDATE terminology SET {trans_column} = ? WHERE id = ?",
-                        [translation, term.id],
-                    )
-                    translated_count += 1
+                # Parse response
+                content = content.strip()
+                if content.startswith("```"):
+                    lines = content.split("\n")
+                    content = "\n".join(lines[1:-1]) if len(lines) > 2 else "{}"
 
-            return translated_count
+                try:
+                    translations = json.loads(content)
+                except json.JSONDecodeError:
+                    # Try to extract JSON object from response
+                    import re
 
-        except Exception as e:
-            self.db.log(
-                level="ERROR",
-                stage="terminology_translate",
-                message=f"Failed to translate terms: {e}",
-                document_id=document_id,
-            )
-            return 0
+                    json_match = re.search(r"\{.*\}", content, re.DOTALL)
+                    if json_match:
+                        translations = json.loads(json_match.group())
+                    else:
+                        translations = {}
+
+                # Update terms in database
+                for term in batch:
+                    if term.term in translations:
+                        translation = translations[term.term]
+                        self.db.conn.execute(
+                            f"UPDATE terminology SET {trans_column} = ? WHERE id = ?",
+                            [translation, term.id],
+                        )
+                        total_translated += 1
+
+            except Exception as e:
+                self.db.log(
+                    level="WARNING",
+                    stage="terminology_translate",
+                    message=f"Failed to translate batch {i // batch_size + 1}: {e}",
+                    document_id=document_id,
+                    context={"batch_start": i, "batch_size": len(batch)},
+                )
+                # Continue with next batch instead of failing completely
+
+        return total_translated
