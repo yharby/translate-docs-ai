@@ -128,7 +128,7 @@ class GlossaryDetector:
                     message=f"Detected glossary page {page.page_number + 1} "
                     f"(confidence: {confidence:.2f}, lang: {detected_lang})",
                     document_id=document_id,
-                    page_id=page.id,
+                    context={"page_id": page.id, "page_number": page.page_number + 1},
                 )
 
         return glossary_pages
