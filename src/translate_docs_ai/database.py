@@ -6,6 +6,7 @@ Handles document catalog, page content, terminology, checkpoints, and logging.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from collections.abc import Generator
@@ -804,3 +805,279 @@ class Database:
             WITH (metric = '{metric}')
             """
         )
+
+    def setup_search_indexes(self) -> None:
+        """Initialize FTS and VSS indexes for terminology search."""
+        # Install and load extensions
+        self.install_extensions()
+
+        # Create FTS index on terminology table for term and context search
+        with contextlib.suppress(duckdb.CatalogException):
+            self.conn.execute(
+                "PRAGMA create_fts_index('terminology', 'id', 'term', 'context', overwrite=1)"
+            )
+
+        # Note: VSS index on terminology.embedding is created dynamically
+        # when embeddings are added (requires non-null embeddings)
+
+    def search_terms_fts(
+        self,
+        query: str,
+        document_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """
+        Full-text search for terms using BM25 scoring.
+
+        Args:
+            query: Search query string.
+            document_id: Optional document ID to filter results.
+            limit: Maximum number of results.
+
+        Returns:
+            List of matching terms with scores.
+        """
+        doc_filter = f"AND document_id = {document_id}" if document_id else ""
+
+        try:
+            rows = self.conn.execute(
+                f"""
+                SELECT
+                    t.id,
+                    t.term,
+                    t.frequency,
+                    t.translation_ar,
+                    t.translation_en,
+                    t.translation_fr,
+                    t.context,
+                    t.document_id,
+                    fts.score
+                FROM (
+                    SELECT *, fts_main_terminology.match_bm25(id, ?) AS score
+                    FROM terminology
+                    WHERE score IS NOT NULL {doc_filter}
+                    ORDER BY score DESC
+                    LIMIT ?
+                ) AS fts
+                JOIN terminology t ON fts.id = t.id
+                """,
+                [query, limit],
+            ).fetchall()
+
+            return [
+                {
+                    "id": row[0],
+                    "term": row[1],
+                    "frequency": row[2],
+                    "translation_ar": row[3],
+                    "translation_en": row[4],
+                    "translation_fr": row[5],
+                    "context": row[6],
+                    "document_id": row[7],
+                    "score": row[8],
+                }
+                for row in rows
+            ]
+        except duckdb.CatalogException:
+            # FTS index not yet created
+            return []
+
+    def search_terms_semantic(
+        self,
+        query_embedding: list[float],
+        document_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """
+        Vector similarity search for terms using cosine distance.
+
+        Args:
+            query_embedding: Query embedding vector.
+            document_id: Optional document ID to filter results.
+            limit: Maximum number of results.
+
+        Returns:
+            List of matching terms with similarity scores.
+        """
+        doc_filter = f"WHERE document_id = {document_id}" if document_id else ""
+        if doc_filter:
+            doc_filter += " AND embedding IS NOT NULL"
+        else:
+            doc_filter = "WHERE embedding IS NOT NULL"
+
+        embedding_str = f"[{','.join(map(str, query_embedding))}]::FLOAT[]"
+
+        try:
+            rows = self.conn.execute(
+                f"""
+                SELECT
+                    id,
+                    term,
+                    frequency,
+                    translation_ar,
+                    translation_en,
+                    translation_fr,
+                    context,
+                    document_id,
+                    array_cosine_similarity(embedding, {embedding_str}) AS similarity
+                FROM terminology
+                {doc_filter}
+                ORDER BY similarity DESC
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+
+            return [
+                {
+                    "id": row[0],
+                    "term": row[1],
+                    "frequency": row[2],
+                    "translation_ar": row[3],
+                    "translation_en": row[4],
+                    "translation_fr": row[5],
+                    "context": row[6],
+                    "document_id": row[7],
+                    "similarity": row[8],
+                }
+                for row in rows
+            ]
+        except duckdb.CatalogException:
+            return []
+
+    def search_terms_hybrid(
+        self,
+        query: str,
+        query_embedding: list[float] | None = None,
+        document_id: int | None = None,
+        limit: int = 20,
+        fts_weight: float = 0.5,
+    ) -> list[dict[str, Any]]:
+        """
+        Hybrid search combining FTS and semantic search.
+
+        Args:
+            query: Text query for FTS.
+            query_embedding: Query embedding for semantic search.
+            document_id: Optional document ID to filter.
+            limit: Maximum results.
+            fts_weight: Weight for FTS score (0-1), semantic gets 1-fts_weight.
+
+        Returns:
+            Combined and ranked results.
+        """
+        # Get FTS results
+        fts_results = self.search_terms_fts(query, document_id, limit * 2)
+        fts_scores = {r["id"]: r["score"] for r in fts_results}
+
+        # Get semantic results if embedding provided
+        semantic_scores: dict[int, float] = {}
+        if query_embedding:
+            semantic_results = self.search_terms_semantic(query_embedding, document_id, limit * 2)
+            semantic_scores = {r["id"]: r["similarity"] for r in semantic_results}
+
+        # Combine and normalize scores
+        all_ids = set(fts_scores.keys()) | set(semantic_scores.keys())
+        combined_results = []
+
+        # Normalize scores
+        max_fts = max(fts_scores.values()) if fts_scores else 1
+        max_sem = max(semantic_scores.values()) if semantic_scores else 1
+
+        for term_id in all_ids:
+            fts_norm = fts_scores.get(term_id, 0) / max_fts if max_fts else 0
+            sem_norm = semantic_scores.get(term_id, 0) / max_sem if max_sem else 0
+
+            combined_score = (fts_weight * fts_norm) + ((1 - fts_weight) * sem_norm)
+
+            # Get full term data
+            term = self.get_term_by_id(term_id)
+            if term:
+                combined_results.append(
+                    {
+                        "id": term_id,
+                        "term": term.term,
+                        "frequency": term.frequency,
+                        "translation_ar": term.translation_ar,
+                        "translation_en": term.translation_en,
+                        "translation_fr": term.translation_fr,
+                        "context": term.context,
+                        "document_id": term.document_id,
+                        "combined_score": combined_score,
+                        "fts_score": fts_scores.get(term_id),
+                        "semantic_score": semantic_scores.get(term_id),
+                    }
+                )
+
+        # Sort by combined score
+        combined_results.sort(key=lambda x: x["combined_score"], reverse=True)
+        return combined_results[:limit]
+
+    def get_term_by_id(self, term_id: int) -> Term | None:
+        """Get a term by its ID."""
+        row = self.conn.execute("SELECT * FROM terminology WHERE id = ?", [term_id]).fetchone()
+        if row:
+            return self._row_to_term(row)
+        return None
+
+    def get_term_glossary(
+        self,
+        document_id: int,
+        target_lang: str,
+    ) -> dict[str, str]:
+        """
+        Get a term→translation glossary for a document.
+
+        Args:
+            document_id: Document to get glossary for.
+            target_lang: Target language code (ar, en, fr).
+
+        Returns:
+            Dictionary mapping source terms to target translations.
+        """
+        target_col = f"translation_{target_lang}"
+        if target_col not in ("translation_ar", "translation_en", "translation_fr"):
+            target_col = "translation_en"
+
+        rows = self.conn.execute(
+            f"""
+            SELECT term, {target_col}
+            FROM terminology
+            WHERE document_id = ?
+            AND {target_col} IS NOT NULL
+            ORDER BY frequency DESC
+            """,
+            [document_id],
+        ).fetchall()
+
+        return {row[0]: row[1] for row in rows if row[1]}
+
+    def update_term_embedding(self, term_id: int, embedding: list[float]) -> None:
+        """Update embedding for a single term."""
+        embedding_str = f"[{','.join(map(str, embedding))}]::FLOAT[]"
+        self.conn.execute(
+            f"UPDATE terminology SET embedding = {embedding_str} WHERE id = ?",
+            [term_id],
+        )
+
+    def get_terms_without_embeddings(self, document_id: int | None = None) -> list[Term]:
+        """Get terms that don't have embeddings yet."""
+        if document_id:
+            rows = self.conn.execute(
+                "SELECT * FROM terminology WHERE embedding IS NULL AND document_id = ?",
+                [document_id],
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM terminology WHERE embedding IS NULL").fetchall()
+        return [self._row_to_term(row) for row in rows]
+
+    def create_terminology_vss_index(self) -> None:
+        """Create VSS index on terminology embeddings if embeddings exist."""
+        # Check if any embeddings exist
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM terminology WHERE embedding IS NOT NULL"
+        ).fetchone()[0]
+
+        if count > 0:
+            with contextlib.suppress(duckdb.CatalogException):
+                self.create_vss_index("terminology", "embedding", "cosine")

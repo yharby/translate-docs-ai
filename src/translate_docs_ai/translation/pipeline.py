@@ -21,6 +21,8 @@ from translate_docs_ai.config import ProcessingMode
 from translate_docs_ai.database import Database, Page, Stage, Status
 from translate_docs_ai.ocr import DeepInfraOCR, PyMuPDFExtractor
 from translate_docs_ai.terminology import TerminologyExtractor
+from translate_docs_ai.terminology.embeddings import EmbeddingGenerator
+from translate_docs_ai.translation.search_tools import TerminologySearchTools
 from translate_docs_ai.translation.translator import PageTranslator
 
 
@@ -96,6 +98,10 @@ class PipelineConfig:
     min_term_frequency: int = 3
     max_terms: int = 500
 
+    # Embedding options
+    enable_embeddings: bool = True  # Generate embeddings for terminology
+    embedding_model: str = "multilingual"  # multilingual, arabic, or fast
+
     # Retry options
     max_retries: int = 3
 
@@ -161,6 +167,24 @@ class TranslationPipeline:
             db=self.db,
             min_frequency=self.config.min_term_frequency,
             max_terms=self.config.max_terms,
+        )
+
+        # Embeddings (optional, for semantic search)
+        self.embedding_generator: EmbeddingGenerator | None = None
+        if self.config.enable_embeddings:
+            try:
+                self.embedding_generator = EmbeddingGenerator(
+                    db=self.db,
+                    model_name=self.config.embedding_model,
+                )
+            except Exception:
+                # sentence-transformers may not be installed
+                self.embedding_generator = None
+
+        # Search tools for terminology lookup
+        self.search_tools = TerminologySearchTools(
+            db=self.db,
+            embedding_generator=self.embedding_generator,
         )
 
         # Translation
@@ -366,18 +390,41 @@ class TranslationPipeline:
             # Extract terms
             terms = self.term_extractor.extract_from_document(document_id)
 
+            # Generate embeddings for semantic search (if enabled)
+            embeddings_generated = 0
+            if self.embedding_generator and terms:
+                try:
+                    embeddings_generated = await self.embedding_generator.generate_term_embeddings(
+                        document_id=document_id,
+                        include_context=True,
+                    )
+                    # Setup search indexes after embeddings are generated
+                    self.search_tools.initialize_search()
+                    self.db.create_terminology_vss_index()
+                except Exception as e:
+                    # Log but don't fail - embeddings are optional
+                    self.db.log(
+                        level="WARNING",
+                        stage="terminology",
+                        message=f"Failed to generate embeddings: {e}",
+                        document_id=document_id,
+                    )
+
             # Save checkpoint
             self.db.save_checkpoint(
                 document_id=document_id,
                 stage=Stage.TERMINOLOGY_EXTRACT,
-                state_data={"terms_count": len(terms)},
+                state_data={
+                    "terms_count": len(terms),
+                    "embeddings_generated": embeddings_generated,
+                },
             )
 
             # Log completion
             self.db.log(
                 level="INFO",
                 stage="terminology",
-                message=f"Extracted {len(terms)} terms",
+                message=f"Extracted {len(terms)} terms, generated {embeddings_generated} embeddings",
                 document_id=document_id,
             )
 
