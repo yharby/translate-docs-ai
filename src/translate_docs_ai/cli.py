@@ -1,0 +1,975 @@
+"""
+CLI for translate-docs-ai.
+
+Provides commands for document scanning, OCR, terminology management,
+translation, and export.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
+
+from translate_docs_ai.config import ProcessingMode, Settings, load_config
+from translate_docs_ai.database import Database, Status
+
+app = typer.Typer(
+    name="translate-docs",
+    help="AI-powered document translation with terminology management.",
+    add_completion=False,
+)
+
+console = Console()
+
+
+def _display_config(settings: Settings, config_path: Path | None) -> None:
+    """Display the configuration being used."""
+    config_source = str(config_path) if config_path else "default (config.yaml or built-in)"
+
+    config_table = Table(show_header=False, box=None, padding=(0, 2))
+    config_table.add_column("Key", style="cyan")
+    config_table.add_column("Value", style="green")
+
+    config_table.add_row("Config file", config_source)
+    config_table.add_row("Project", settings.project.name)
+    config_table.add_row("", "")
+    config_table.add_row("[bold]OCR Settings[/bold]", "")
+    config_table.add_row("  Primary model", settings.ocr.primary_model.value)
+    config_table.add_row("  Fallback model", settings.ocr.fallback_model.value)
+    config_table.add_row("  Force OCR", str(settings.ocr.force_ocr))
+    config_table.add_row("  Image DPI", str(settings.ocr.image_dpi))
+    config_table.add_row(
+        "  DeepInfra API", "configured" if settings.ocr.deepinfra_api_key else "[red]not set[/red]"
+    )
+    config_table.add_row("", "")
+    config_table.add_row("[bold]Translation Settings[/bold]", "")
+    config_table.add_row("  Model", settings.translation.default_model)
+    config_table.add_row("  Source language", settings.translation.source_language)
+    config_table.add_row("  Target language", settings.translation.target_language)
+    config_table.add_row(
+        "  OpenRouter API",
+        "configured" if settings.translation.openrouter_api_key else "[red]not set[/red]",
+    )
+
+    console.print(
+        Panel(config_table, title="[bold blue]translate-docs-ai[/bold blue]", border_style="blue")
+    )
+
+
+def get_settings(config_path: Path | None = None) -> Settings:
+    """Load settings from config file or defaults."""
+    if config_path and config_path.exists():
+        return load_config(config_path)
+    return Settings()
+
+
+def get_database(settings: Settings) -> Database:
+    """Get database instance."""
+    return Database(settings.paths.database_path)
+
+
+@app.command()
+def scan(
+    input_dir: Path = typer.Argument(..., help="Directory to scan for documents"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+    recursive: bool = typer.Option(
+        True, "--recursive/--no-recursive", "-r", help="Scan recursively"
+    ),
+) -> None:
+    """Scan directory for documents and add to catalog."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    from translate_docs_ai.scanner import DocumentScanner
+
+    scanner = DocumentScanner(db, console)
+
+    try:
+        documents = scanner.scan_directory(input_dir, recursive=recursive)
+        console.print(f"\n[green]Scanned {len(documents)} documents[/green]")
+
+        # Show summary table
+        if documents:
+            table = Table(title="Documents Found")
+            table.add_column("Name", style="cyan")
+            table.add_column("Type", style="magenta")
+            table.add_column("Pages", justify="right")
+            table.add_column("Status", style="yellow")
+
+            for doc in documents[:20]:  # Limit to 20
+                table.add_row(
+                    doc.file_name,
+                    doc.file_type,
+                    str(doc.total_pages),
+                    doc.status.value,
+                )
+
+            if len(documents) > 20:
+                table.add_row("...", "...", "...", "...")
+
+            console.print(table)
+
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
+
+
+@app.command()
+def status(
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+) -> None:
+    """Show processing status for all documents."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    docs = db.get_all_documents()
+
+    if not docs:
+        console.print("[yellow]No documents in database[/yellow]")
+        return
+
+    # Status summary
+    status_counts = {}
+    for doc in docs:
+        status_counts[doc.status.value] = status_counts.get(doc.status.value, 0) + 1
+
+    console.print(
+        Panel(
+            "\n".join(f"{k}: {v}" for k, v in status_counts.items()),
+            title="Document Status Summary",
+        )
+    )
+
+    # Document table
+    table = Table(title="Documents")
+    table.add_column("ID", style="dim")
+    table.add_column("Name", style="cyan")
+    table.add_column("Type")
+    table.add_column("Pages", justify="right")
+    table.add_column("Status", style="yellow")
+
+    for doc in docs[:50]:
+        status_style = {
+            Status.PENDING: "yellow",
+            Status.IN_PROGRESS: "blue",
+            Status.COMPLETED: "green",
+            Status.FAILED: "red",
+        }.get(doc.status, "white")
+
+        table.add_row(
+            str(doc.id or ""),
+            doc.file_name[:40],
+            doc.file_type,
+            str(doc.total_pages),
+            f"[{status_style}]{doc.status.value}[/{status_style}]",
+        )
+
+    console.print(table)
+
+
+@app.command()
+def extract(
+    document_id: int | None = typer.Option(None, "--doc", "-d", help="Document ID"),
+    all_docs: bool = typer.Option(False, "--all", "-a", help="Process all pending"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+    force_ocr: bool = typer.Option(False, "--force-ocr", help="Force OCR even for native PDFs"),
+) -> None:
+    """Extract text from documents using OCR."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    from translate_docs_ai.ocr import PyMuPDFExtractor
+
+    pymupdf = PyMuPDFExtractor()
+
+    # Get documents to process
+    if document_id:
+        doc = db.get_document(document_id)
+        if not doc:
+            console.print(f"[red]Document {document_id} not found[/red]")
+            raise typer.Exit(1)
+        documents = [doc]
+    elif all_docs:
+        documents = db.get_all_documents(Status.PENDING)
+    else:
+        console.print("[red]Specify --doc ID or --all[/red]")
+        raise typer.Exit(1)
+
+    if not documents:
+        console.print("[yellow]No documents to process[/yellow]")
+        return
+
+    async def process_docs():
+        for doc in documents:
+            console.print(f"\n[cyan]Processing: {doc.file_name}[/cyan]")
+            doc_path = Path(doc.full_path)
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task(f"Extracting {doc.file_name}", total=doc.total_pages)
+
+                for page_num in range(doc.total_pages):
+                    result = await pymupdf.extract_page(doc_path, page_num)
+
+                    from translate_docs_ai.database import Page
+
+                    page = Page(
+                        document_id=doc.id,
+                        page_number=page_num,
+                        original_content=result.content,
+                        ocr_confidence=result.confidence,
+                    )
+                    db.add_page(page)
+
+                    progress.advance(task)
+
+            console.print(f"[green]Extracted {doc.total_pages} pages[/green]")
+
+    asyncio.run(process_docs())
+
+
+@app.command()
+def terms(
+    document_id: int = typer.Option(..., "--doc", "-d", help="Document ID"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+    extract_new: bool = typer.Option(False, "--extract", "-e", help="Extract terminology"),
+    show_all: bool = typer.Option(False, "--all", "-a", help="Show all terms"),
+) -> None:
+    """Manage terminology for a document."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    doc = db.get_document(document_id)
+    if not doc:
+        console.print(f"[red]Document {document_id} not found[/red]")
+        raise typer.Exit(1)
+
+    if extract_new:
+        from translate_docs_ai.terminology import TerminologyExtractor
+
+        extractor = TerminologyExtractor(
+            db=db,
+            min_frequency=settings.translation.min_term_frequency,
+            max_terms=settings.translation.max_terms,
+        )
+
+        with console.status("Extracting terminology..."):
+            terms_list = extractor.extract_from_document(document_id)
+
+        console.print(f"[green]Extracted {len(terms_list)} terms[/green]")
+
+    # Display terms
+    terms_list = db.get_document_terms(document_id)
+
+    if not terms_list:
+        console.print("[yellow]No terms found[/yellow]")
+        return
+
+    table = Table(title=f"Terminology - {doc.file_name}")
+    table.add_column("Term", style="cyan")
+    table.add_column("Freq", justify="right")
+    table.add_column("AR Translation")
+    table.add_column("Approved", justify="center")
+
+    display_terms = terms_list if show_all else terms_list[:30]
+
+    for term in display_terms:
+        approved = "[green]✓[/green]" if term.approved else ""
+        table.add_row(
+            term.term[:30],
+            str(term.frequency),
+            (term.translation_ar or "")[:30],
+            approved,
+        )
+
+    console.print(table)
+
+    if len(terms_list) > 30 and not show_all:
+        console.print(f"[dim]Showing 30 of {len(terms_list)} terms. Use --all to see all.[/dim]")
+
+
+@app.command()
+def translate(
+    document_id: int | None = typer.Option(None, "--doc", "-d", help="Document ID"),
+    all_docs: bool = typer.Option(False, "--all", "-a", help="Process all pending"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+    mode: str = typer.Option("auto", "--mode", "-m", help="Processing mode: auto or semi-auto"),
+    source: str | None = typer.Option(
+        None, "--source", "-s", help="Source language (default: from config)"
+    ),
+    target: str | None = typer.Option(
+        None, "--target", "-t", help="Target language (default: from config)"
+    ),
+) -> None:
+    """Translate documents."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    # Use config values if not specified on command line
+    source_lang = source or settings.translation.source_language
+    target_lang = target or settings.translation.target_language
+
+    # Display config being used
+    _display_config(settings, config)
+
+    # Validate API keys
+    if not settings.translation.openrouter_api_key:
+        console.print("[red]OpenRouter API key not configured[/red]")
+        console.print("Set OPENROUTER_API_KEY environment variable or add to config")
+        raise typer.Exit(1)
+
+    # Get documents
+    if document_id:
+        doc = db.get_document(document_id)
+        if not doc:
+            console.print(f"[red]Document {document_id} not found[/red]")
+            raise typer.Exit(1)
+        documents = [doc]
+    elif all_docs:
+        documents = db.get_all_documents(Status.PENDING) + db.get_all_documents(Status.IN_PROGRESS)
+    else:
+        console.print("[red]Specify --doc ID or --all[/red]")
+        raise typer.Exit(1)
+
+    if not documents:
+        console.print("[yellow]No documents to translate[/yellow]")
+        return
+
+    # Show documents to process
+    console.print(f"\n[bold]Processing {len(documents)} document(s)[/bold]\n")
+
+    # Setup pipeline
+    from translate_docs_ai.translation.pipeline import PipelineConfig, TranslationPipeline
+
+    processing_mode = ProcessingMode.SEMI_AUTO if mode == "semi-auto" else ProcessingMode.AUTO
+
+    # Map OCR model names from config to short names used by DeepInfraOCR
+    def map_ocr_model(model_name: str) -> str:
+        """Map full model name to short name for DeepInfraOCR."""
+        model_map = {
+            "deepseek-ai/DeepSeek-OCR": "deepseek",
+            "allenai/olmOCR-2-7B-1025": "olmocr",
+            "pymupdf4llm": "pymupdf",
+        }
+        return model_map.get(model_name, model_name)
+
+    pipeline_config = PipelineConfig(
+        openrouter_api_key=settings.translation.openrouter_api_key,
+        deepinfra_api_key=settings.ocr.deepinfra_api_key,
+        processing_mode=processing_mode,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        translation_model=settings.translation.default_model,
+        # OCR settings from config
+        ocr_dpi=settings.ocr.image_dpi,
+        force_ocr=settings.ocr.force_ocr,
+        ocr_primary_model=map_ocr_model(settings.ocr.primary_model.value),
+        ocr_fallback_model=map_ocr_model(settings.ocr.fallback_model.value),
+    )
+
+    async def run_pipeline():
+        # Pipeline stages for progress tracking
+        stages = [
+            ("init", "Initializing"),
+            ("ocr", "Extracting text (OCR)"),
+            ("terminology", "Extracting terminology"),
+            ("translation", "Translating pages"),
+            ("export", "Finalizing"),
+        ]
+
+        for doc_idx, doc in enumerate(documents):
+            # Document header
+            doc_info = Table(show_header=False, box=None, padding=(0, 1))
+            doc_info.add_column("", style="bold")
+            doc_info.add_column("")
+            doc_info.add_row("Document", f"[cyan]{doc.file_name}[/cyan]")
+            doc_info.add_row("Pages", str(doc.total_pages))
+            doc_info.add_row("Progress", f"{doc_idx + 1}/{len(documents)}")
+            console.print(Panel(doc_info, title="[bold]Processing[/bold]", border_style="cyan"))
+
+            # Create progress bar for stages
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(complete_style="green", finished_style="green"),
+                TaskProgressColumn(),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False,
+            ) as progress:
+                # Overall stage progress
+                stage_task = progress.add_task("[cyan]Starting pipeline...", total=len(stages))
+
+                try:
+                    pipeline = TranslationPipeline(db, pipeline_config)
+
+                    # Update progress for init
+                    progress.update(stage_task, description="[cyan]Initializing...")
+
+                    state = await pipeline.process_document(doc.id)
+
+                    # Update based on final state
+                    final_stage = state.get("current_stage")
+                    if final_stage:
+                        stage_name = (
+                            final_stage.value if hasattr(final_stage, "value") else str(final_stage)
+                        )
+
+                        # Find completed stage index
+                        stage_idx = 0
+                        for i, (name, _desc) in enumerate(stages):
+                            if name == stage_name or stage_name in ("complete", "error"):
+                                stage_idx = i + 1
+                                break
+
+                        # Update to final state
+                        if stage_name == "complete":
+                            progress.update(
+                                stage_task,
+                                completed=len(stages),
+                                description="[green]Complete!",
+                            )
+                        elif stage_name == "error":
+                            progress.update(
+                                stage_task,
+                                description="[red]Error occurred",
+                            )
+                        else:
+                            # Find the stage description
+                            for name, desc in stages:
+                                if name == stage_name:
+                                    progress.update(
+                                        stage_task,
+                                        completed=stage_idx,
+                                        description=f"[yellow]{desc}",
+                                    )
+                                    break
+
+                    # Show result summary
+                    console.print()
+                    if state["current_stage"].value == "complete":
+                        # Show stats
+                        pages_ocr = len(state.get("ocr_results", {}))
+                        terms = state.get("terms_extracted", 0)
+                        pages_translated = state.get("pages_translated", 0)
+
+                        result_table = Table(show_header=False, box=None)
+                        result_table.add_column("", style="dim")
+                        result_table.add_column("")
+                        result_table.add_row("OCR", f"{pages_ocr} pages extracted")
+                        result_table.add_row("Terms", f"{terms} terms found")
+                        result_table.add_row("Translation", f"{pages_translated} pages translated")
+
+                        console.print(
+                            Panel(
+                                result_table,
+                                title="[green]✓ Completed[/green]",
+                                border_style="green",
+                            )
+                        )
+                    elif state["current_stage"].value == "review":
+                        console.print(f"[yellow]⏸ Awaiting review: {doc.file_name}[/yellow]")
+                        console.print(f"Run 'translate-docs approve --doc {doc.id}' to continue")
+                    else:
+                        console.print(f"[red]✗ Failed: {doc.file_name}[/red]")
+                        for error in state.get("errors", []):
+                            console.print(f"  [red]• {error}[/red]")
+
+                except Exception as e:
+                    progress.update(stage_task, description="[red]Error")
+                    console.print(f"\n[red]Error processing {doc.file_name}: {e}[/red]")
+
+            console.print()  # Spacing between documents
+
+    asyncio.run(run_pipeline())
+
+
+@app.command()
+def approve(
+    document_id: int = typer.Option(..., "--doc", "-d", help="Document ID"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+) -> None:
+    """Approve terminology review and continue translation."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    doc = db.get_document(document_id)
+    if not doc:
+        console.print(f"[red]Document {document_id} not found[/red]")
+        raise typer.Exit(1)
+
+    from translate_docs_ai.translation.pipeline import PipelineConfig, TranslationPipeline
+
+    pipeline_config = PipelineConfig(
+        openrouter_api_key=settings.translation.openrouter_api_key,
+        deepinfra_api_key=settings.ocr.deepinfra_api_key,
+    )
+
+    pipeline = TranslationPipeline(db, pipeline_config)
+
+    async def approve_and_continue():
+        await pipeline.approve_review(document_id)
+        console.print(f"[green]Review approved for document {document_id}[/green]")
+
+        # Continue processing
+        state = await pipeline.process_document(document_id, resume=True)
+
+        if state["current_stage"].value == "complete":
+            console.print("[green]✓ Translation completed[/green]")
+        else:
+            stage = state["current_stage"].value
+            console.print(f"[yellow]Current stage: {stage}[/yellow]")
+
+    asyncio.run(approve_and_continue())
+
+
+@app.command()
+def logs(
+    document_id: int | None = typer.Option(None, "--doc", "-d", help="Filter by document"),
+    level: str | None = typer.Option(None, "--level", "-l", help="Filter by level"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max entries to show"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+) -> None:
+    """View processing logs."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    # Build query
+    where_clauses = []
+    params = []
+
+    if document_id:
+        where_clauses.append("document_id = ?")
+        params.append(document_id)
+
+    if level:
+        where_clauses.append("level = ?")
+        params.append(level.upper())
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    logs_data = db.conn.execute(
+        f"""
+        SELECT created_at, level, stage, message, document_id
+        FROM processing_log
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        params + [limit],
+    ).fetchall()
+
+    if not logs_data:
+        console.print("[yellow]No log entries found[/yellow]")
+        return
+
+    table = Table(title="Processing Logs")
+    table.add_column("Time", style="dim")
+    table.add_column("Level")
+    table.add_column("Stage", style="cyan")
+    table.add_column("Message")
+    table.add_column("Doc", justify="right")
+
+    for row in logs_data:
+        timestamp, lvl, stage, message, doc_id = row
+
+        level_style = {
+            "INFO": "green",
+            "WARNING": "yellow",
+            "ERROR": "red",
+        }.get(lvl, "white")
+
+        time_str = (
+            str(timestamp).split("T")[1][:8] if "T" in str(timestamp) else str(timestamp)[:19]
+        )
+
+        table.add_row(
+            time_str,
+            f"[{level_style}]{lvl}[/{level_style}]",
+            stage or "",
+            (message or "")[:60],
+            str(doc_id or ""),
+        )
+
+    console.print(table)
+
+
+@app.command()
+def init(
+    output_path: Path = typer.Option(
+        Path("config.yaml"),
+        "--output",
+        "-o",
+        help="Output path for config file",
+    ),
+) -> None:
+    """Generate a default configuration file."""
+    default_config = """# translate-docs-ai configuration
+
+# Path settings
+paths:
+  input_dir: ./documents
+  output_dir: ./translated
+  database_path: ./translate_docs.db
+
+# OCR settings
+ocr:
+  default_provider: pymupdf
+  deepinfra_model: olmocr
+  dpi: 150
+  force_ocr: false
+  # deepinfra_api_key: ${DEEPINFRA_API_KEY}
+
+# Translation settings
+translation:
+  default_model: anthropic/claude-3.5-sonnet
+  source_language: en
+  target_languages:
+    - ar
+  temperature: 0.3
+  max_tokens: 8192
+  min_term_frequency: 3
+  max_terms: 500
+  # openrouter_api_key: ${OPENROUTER_API_KEY}
+
+# Processing mode: auto or semi_auto
+processing:
+  mode: auto
+  concurrent_pages: 1
+  max_retries: 3
+
+# Logging
+logging:
+  level: INFO
+  json_file: ./logs/translate_docs.json
+"""
+
+    if output_path.exists():
+        overwrite = typer.confirm(f"{output_path} already exists. Overwrite?")
+        if not overwrite:
+            raise typer.Abort()
+
+    output_path.write_text(default_config)
+    console.print(f"[green]Created config file: {output_path}[/green]")
+    console.print("\nEdit the file and set your API keys, then run:")
+    console.print("  translate-docs scan ./documents --config config.yaml")
+
+
+@app.command()
+def stats(
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+) -> None:
+    """Show processing statistics."""
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    stats_data = db.get_statistics()
+
+    console.print(
+        Panel(
+            f"""
+Documents: {stats_data["total_documents"]}
+  - Completed: {stats_data["completed_documents"]}
+  - In Progress: {stats_data["in_progress_documents"]}
+  - Pending: {stats_data["pending_documents"]}
+  - Failed: {stats_data["failed_documents"]}
+
+Pages: {stats_data["total_pages"]}
+  - Translated: {stats_data["translated_pages"]}
+
+Terms: {stats_data["total_terms"]}
+        """.strip(),
+            title="Processing Statistics",
+        )
+    )
+
+
+@app.command()
+def export(
+    document_id: int | None = typer.Option(None, "--doc", "-d", help="Document ID to export"),
+    all_docs: bool = typer.Option(False, "--all", "-a", help="Export all completed documents"),
+    output_dir: Path | None = typer.Option(None, "--output", "-o", help="Output directory"),
+    language: str = typer.Option("en", "--lang", "-l", help="Language to export (en, ar, fr)"),
+    fmt: str = typer.Option("md", "--format", "-f", help="Export format: md, pdf, docx"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
+    combined: bool = typer.Option(
+        True, "--combined/--separate", help="For markdown: single file or separate per page"
+    ),
+) -> None:
+    """Export translated documents to markdown, PDF, or DOCX files."""
+    from translate_docs_ai.export import DOCXExporter, MarkdownExporter, PDFExporter
+
+    settings = get_settings(config)
+    db = get_database(settings)
+
+    # Determine output directory
+    out_dir = output_dir or settings.paths.output_dir
+
+    # Get documents to export
+    if document_id:
+        doc = db.get_document(document_id)
+        if not doc:
+            console.print(f"[red]Document {document_id} not found[/red]")
+            raise typer.Exit(1)
+        documents = [doc]
+    elif all_docs:
+        documents = db.get_all_documents(Status.COMPLETED)
+    else:
+        console.print("[red]Specify --doc ID or --all[/red]")
+        raise typer.Exit(1)
+
+    if not documents:
+        console.print("[yellow]No completed documents to export[/yellow]")
+        return
+
+    # Validate format
+    fmt = fmt.lower()
+    if fmt not in ("md", "pdf", "docx"):
+        console.print(f"[red]Unsupported format: {fmt}. Use md, pdf, or docx[/red]")
+        raise typer.Exit(1)
+
+    # Create appropriate exporter
+    if fmt == "pdf":
+        exporter = PDFExporter(db, out_dir)
+        format_name = "PDF"
+    elif fmt == "docx":
+        exporter = DOCXExporter(db, out_dir)
+        format_name = "DOCX"
+    else:
+        exporter = MarkdownExporter(db, out_dir)
+        format_name = "Markdown"
+
+    console.print(f"[cyan]Exporting to {format_name}...[/cyan]\n")
+
+    # Export documents with progress
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Exporting...", total=len(documents))
+
+        results = []
+        for doc in documents:
+            progress.update(task, description=f"Exporting {doc.file_name}")
+
+            if fmt == "md":
+                result = exporter.export_document(doc, language=language, combined=combined)
+            else:
+                result = exporter.export_document(doc, language=language)
+
+            results.append(result)
+            progress.advance(task)
+
+    # Display results
+    exported_count = 0
+    for result in results:
+        if result.success:
+            exported_count += 1
+            console.print(
+                f"  [green]✓[/green] {result.output_path.name} ({result.pages_exported} pages)"
+            )
+        else:
+            console.print(f"  [yellow]⚠[/yellow] {result.document_name}: {result.error}")
+
+    console.print(f"\n[green]Exported {exported_count} document(s) to {out_dir}[/green]")
+
+
+@app.command()
+def run(
+    config_file: Path = typer.Argument(..., help="Path to config.yaml file"),
+) -> None:
+    """
+    Run the full pipeline: scan, translate, and export.
+
+    This is the simplest way to process documents - just provide a config file:
+
+        translate-docs run config.yaml
+
+    The config file defines input directory, output formats, languages, and all other settings.
+    API keys are read from environment variables or .env file.
+    """
+    if not config_file.exists():
+        console.print(f"[red]Config file not found: {config_file}[/red]")
+        raise typer.Exit(1)
+
+    settings = load_config(config_file)
+    db = get_database(settings)
+
+    # Display config
+    _display_config(settings, config_file)
+
+    # Validate API keys
+    if not settings.translation.openrouter_api_key:
+        console.print("[red]OpenRouter API key not configured[/red]")
+        console.print("Set OPENROUTER_API_KEY environment variable or in .env file")
+        raise typer.Exit(1)
+
+    if settings.ocr.force_ocr and not settings.ocr.deepinfra_api_key:
+        console.print("[red]DeepInfra API key not configured (required for OCR)[/red]")
+        console.print("Set DEEPINFRA_API_KEY environment variable or in .env file")
+        raise typer.Exit(1)
+
+    # Step 1: Scan input directory
+    console.print(f"\n[bold cyan]Step 1: Scanning {settings.paths.input_dir}[/bold cyan]\n")
+
+    from translate_docs_ai.scanner import DocumentScanner
+
+    scanner = DocumentScanner(db, console)
+
+    try:
+        documents = scanner.scan_directory(settings.paths.input_dir, recursive=True)
+        console.print(f"[green]Found {len(documents)} document(s)[/green]\n")
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    if not documents:
+        console.print("[yellow]No documents to process[/yellow]")
+        return
+
+    # Step 2: Translate
+    console.print("[bold cyan]Step 2: Processing documents[/bold cyan]\n")
+
+    from translate_docs_ai.translation.pipeline import PipelineConfig, TranslationPipeline
+
+    def map_ocr_model(model_name: str) -> str:
+        model_map = {
+            "deepseek-ai/DeepSeek-OCR": "deepseek",
+            "allenai/olmOCR-2-7B-1025": "olmocr",
+            "pymupdf4llm": "pymupdf",
+        }
+        return model_map.get(model_name, model_name)
+
+    pipeline_config = PipelineConfig(
+        openrouter_api_key=settings.translation.openrouter_api_key,
+        deepinfra_api_key=settings.ocr.deepinfra_api_key,
+        processing_mode=settings.processing.mode,
+        source_lang=settings.translation.source_language,
+        target_lang=settings.translation.target_language,
+        translation_model=settings.translation.default_model,
+        ocr_dpi=settings.ocr.image_dpi,
+        force_ocr=settings.ocr.force_ocr,
+        ocr_primary_model=map_ocr_model(settings.ocr.primary_model.value),
+        ocr_fallback_model=map_ocr_model(settings.ocr.fallback_model.value),
+    )
+
+    async def process_all():
+        for doc_idx, doc in enumerate(documents):
+            doc_info = Table(show_header=False, box=None, padding=(0, 1))
+            doc_info.add_column("", style="bold")
+            doc_info.add_column("")
+            doc_info.add_row("Document", f"[cyan]{doc.file_name}[/cyan]")
+            doc_info.add_row("Pages", str(doc.total_pages))
+            doc_info.add_row("Progress", f"{doc_idx + 1}/{len(documents)}")
+            console.print(Panel(doc_info, title="[bold]Processing[/bold]", border_style="cyan"))
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(complete_style="green", finished_style="green"),
+                TaskProgressColumn(),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False,
+            ) as progress:
+                stage_task = progress.add_task("[cyan]Starting pipeline...", total=5)
+
+                try:
+                    pipeline = TranslationPipeline(db, pipeline_config)
+                    progress.update(stage_task, description="[cyan]Processing...")
+
+                    state = await pipeline.process_document(doc.id)
+
+                    final_stage = state.get("current_stage")
+                    if final_stage and hasattr(final_stage, "value"):
+                        if final_stage.value == "complete":
+                            progress.update(stage_task, completed=5, description="[green]Complete!")
+                        elif final_stage.value == "error":
+                            progress.update(stage_task, description="[red]Error occurred")
+
+                    console.print()
+                    if state["current_stage"].value == "complete":
+                        console.print(f"[green]✓ Completed: {doc.file_name}[/green]")
+                    else:
+                        console.print(f"[red]✗ Failed: {doc.file_name}[/red]")
+                        for error in state.get("errors", []):
+                            console.print(f"  [red]• {error}[/red]")
+
+                except Exception as e:
+                    progress.update(stage_task, description="[red]Error")
+                    console.print(f"\n[red]Error: {e}[/red]")
+
+            console.print()
+
+    asyncio.run(process_all())
+
+    # Step 3: Export (if auto_export enabled)
+    if settings.export.auto_export:
+        console.print("[bold cyan]Step 3: Exporting translations[/bold cyan]\n")
+
+        from translate_docs_ai.export import DOCXExporter, MarkdownExporter, PDFExporter
+
+        out_dir = settings.paths.output_dir
+        completed_docs = db.get_all_documents(Status.COMPLETED)
+
+        if completed_docs:
+            export_lang = settings.translation.target_language
+            source_lang = settings.translation.source_language
+
+            # Export in enabled formats (pass source_lang for RTL/LTR table fallback)
+            if settings.export.markdown:
+                exporter = MarkdownExporter(db, out_dir)
+                for doc in completed_docs:
+                    exporter.export_document(
+                        doc,
+                        language=export_lang,
+                        combined=settings.export.markdown_combined,
+                        source_lang=source_lang,
+                    )
+                console.print("[green]✓ Exported Markdown[/green]")
+
+            if settings.export.pdf:
+                exporter = PDFExporter(db, out_dir)
+                for doc in completed_docs:
+                    exporter.export_document(doc, language=export_lang, source_lang=source_lang)
+                console.print("[green]✓ Exported PDF[/green]")
+
+            if settings.export.docx:
+                exporter = DOCXExporter(db, out_dir)
+                for doc in completed_docs:
+                    exporter.export_document(doc, language=export_lang, source_lang=source_lang)
+                console.print("[green]✓ Exported DOCX[/green]")
+
+            console.print(f"\n[green]Output saved to: {out_dir}[/green]")
+        else:
+            console.print("[yellow]No completed documents to export[/yellow]")
+
+    console.print("\n[bold green]Done![/bold green]")
+
+
+def main() -> None:
+    """Entry point for CLI."""
+    app()
+
+
+if __name__ == "__main__":
+    main()

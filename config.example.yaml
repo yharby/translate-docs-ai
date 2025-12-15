@@ -1,0 +1,102 @@
+# translate-docs-ai configuration
+# All settings can be overridden via environment variables
+
+# Project metadata
+project:
+  name: "geosa-translation"
+  description: "GEOSA regulatory framework translation"
+
+# Path settings
+paths:
+  input_dir: ./test_documents
+  output_dir: ./translated
+  database_path: ./translate_docs.db
+  checkpoints: ./data/checkpoints
+  logs: ./logs
+
+# OCR settings
+ocr:
+  # Primary OCR model: allenai/olmOCR-2-7B-1025 (best for documents)
+  primary_model: allenai/olmOCR-2-7B-1025
+  fallback_model: allenai/olmOCR-2-7B-1025 # Same as primary (no fallback needed)
+  native_pdf_extractor: pymupdf4llm # Only used if force_ocr is false
+  # Force OCR even for native PDFs (skip pymupdf text extraction entirely)
+  force_ocr: true
+  image_dpi: 300 # Higher DPI for better OCR quality
+  max_retries: 3
+  timeout_seconds: 180 # Longer timeout for API calls
+  # API key for DeepInfra (required for olmOCR)
+  deepinfra_api_key: ${DEEPINFRA_API_KEY}
+
+# Translation settings
+translation:
+  default_model: anthropic/claude-3.5-sonnet
+  source_language: ar
+  target_language: en
+  temperature: 0.3
+  max_tokens_per_request: 8192
+  min_term_frequency: 3
+  max_terms: 500
+  # API key for OpenRouter
+  openrouter_api_key: ${OPENROUTER_API_KEY}
+
+  # Context settings for translation
+  context:
+    include_previous_page: true
+    include_next_page_preview: true
+    max_context_tokens: 500
+
+# Terminology extraction settings
+terminology:
+  min_frequency: 3
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  similarity_threshold: 0.85
+  max_terms_per_document: 500
+
+# Processing pipeline settings
+processing:
+  # Mode: auto (fully automated) or semi-auto (pause for review)
+  mode: auto
+  batch_size: 10
+  max_retries: 3
+  retry_delay: 5.0
+  concurrent_pages: 1
+
+  # Semi-auto mode settings
+  semi_auto:
+    review_terminology: true
+    review_term_translations: true
+    review_page_translations: false
+    export_terminology_csv: true
+    terminology_csv_path: ./review/terminology.csv
+
+  # Auto mode settings
+  auto:
+    continue_on_error: true
+    auto_approve_confidence_threshold: 0.8
+
+# Export settings - enable/disable output formats
+export:
+  # Enable markdown export
+  markdown: true
+  # Combine all pages into single file (false = separate file per page)
+  markdown_combined: true
+
+  # Enable PDF export
+  pdf: true
+
+  # Enable DOCX export
+  docx: true
+
+  # Auto-export after translation completes
+  auto_export: true
+
+  # Languages to export (empty = use target_language from translation)
+  languages: []
+
+# Logging settings
+logging:
+  level: INFO
+  file: ./logs/translation.log
+  max_file_size_mb: 10
+  backup_count: 5

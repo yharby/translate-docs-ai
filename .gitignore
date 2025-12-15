@@ -1,0 +1,57 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Config and secrets
+config.yaml
+.env
+.env.local
+
+# Database
+*.db
+*.duckdb
+translate_docs.db
+translate_docs.db.wal
+data/checkpoints/
+
+# Output
+translated/
+output/
+logs/
+review/
+
+# Test documents (user should add their own)
+test_documents/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# UV lock (regenerated)
+# uv.lock
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
