@@ -225,12 +225,28 @@ class Database:
     -- Create sequence for processing_log if not exists
     CREATE SEQUENCE IF NOT EXISTS processing_log_id_seq START 1;
 
+    -- Long-term memory store for LangGraph
+    CREATE TABLE IF NOT EXISTS memory_store (
+        id INTEGER PRIMARY KEY,
+        namespace VARCHAR NOT NULL,
+        key VARCHAR NOT NULL,
+        value JSON NOT NULL,
+        embedding FLOAT[],
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(namespace, key)
+    );
+
+    -- Create sequence for memory_store if not exists
+    CREATE SEQUENCE IF NOT EXISTS memory_store_id_seq START 1;
+
     -- Create indexes for efficient queries
     CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
     CREATE INDEX IF NOT EXISTS idx_pages_document ON pages(document_id);
     CREATE INDEX IF NOT EXISTS idx_terminology_document ON terminology(document_id);
     CREATE INDEX IF NOT EXISTS idx_state_resume ON processing_state(document_id, stage, status);
     CREATE INDEX IF NOT EXISTS idx_log_lookup ON processing_log(run_id, stage, level);
+    CREATE INDEX IF NOT EXISTS idx_memory_namespace ON memory_store(namespace);
     """
 
     def __init__(self, db_path: Path | str):

@@ -19,6 +19,7 @@ from langgraph.graph import END, StateGraph
 
 from translate_docs_ai.config import ProcessingMode
 from translate_docs_ai.database import Database, Page, Stage, Status
+from translate_docs_ai.memory import DuckDBStore
 from translate_docs_ai.ocr import DeepInfraOCR, PyMuPDFExtractor
 from translate_docs_ai.terminology import TerminologyExtractor
 from translate_docs_ai.terminology.embeddings import EmbeddingGenerator
@@ -101,6 +102,9 @@ class PipelineConfig:
     # Embedding options
     enable_embeddings: bool = True  # Generate embeddings for terminology
     embedding_model: str = "multilingual"  # multilingual, arabic, or fast
+
+    # Memory options
+    enable_memory: bool = True  # Enable DuckDB-backed long-term memory
 
     # Retry options
     max_retries: int = 3
@@ -186,6 +190,14 @@ class TranslationPipeline:
             db=self.db,
             embedding_generator=self.embedding_generator,
         )
+
+        # Long-term memory store (optional)
+        self.memory_store: DuckDBStore | None = None
+        if self.config.enable_memory:
+            self.memory_store = DuckDBStore(
+                db=self.db,
+                embedding_generator=self.embedding_generator,
+            )
 
         # Translation
         self.translator = PageTranslator(

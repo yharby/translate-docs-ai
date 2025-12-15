@@ -33,11 +33,173 @@ This project has been **fully implemented** based on the investigation findings 
 - Multi-format export (MD, PDF, DOCX)
 - Simple `run` command for one-step execution
 
-**Not yet implemented (available infrastructure exists):**
-- DuckDB FTS indexes (code exists, not called in pipeline)
-- DuckDB VSS vector indexes (code exists, not called in pipeline)
-- Embedding generation for terminology (code exists, not used)
-- RAG-based term suggestions (code exists, not integrated)
+**Recently Implemented (December 2025):**
+- DuckDB FTS indexes for terminology search (BM25 scoring)
+- DuckDB VSS vector indexes (HNSW) for semantic search
+- Embedding generation for terminology (sentence-transformers)
+- DuckDBStore for LangGraph long-term memory
+- Hybrid search (FTS + VSS combined)
+
+---
+
+## Memory & Search Architecture
+
+### Multi-Stage Memory Integration
+
+The system uses FTS, VSS, and memory at **three key stages** to ensure translation consistency and reduce LLM hallucinations:
+
+```mermaid
+flowchart TB
+    subgraph Stage1["Stage 1: OCR Ingestion"]
+        OCR[olmOCR-2 via DeepInfra]
+        Pages[(pages table)]
+        OCR --> |original_content| Pages
+    end
+
+    subgraph Stage2["Stage 2: Terminology Extraction"]
+        Extract[Term Extractor]
+        Terms[(terminology table)]
+        FTS[FTS Index BM25]
+        Embed[Embedding Generator]
+        VSS[VSS Index HNSW]
+
+        Pages --> Extract
+        Extract --> Terms
+        Terms --> FTS
+        Terms --> Embed
+        Embed --> VSS
+    end
+
+    subgraph Stage3["Stage 3: Translation with Memory"]
+        Memory[(memory_store table)]
+        Context[Context Builder]
+        Search[Hybrid Search]
+        LLM[Claude 3.5 Sonnet]
+        Translate[Translated Content]
+
+        Terms --> Search
+        FTS --> Search
+        VSS --> Search
+        Memory --> Context
+        Search --> Context
+        Context --> LLM
+        LLM --> Translate
+        LLM --> |Store decisions| Memory
+        Translate --> Pages
+    end
+
+    Stage1 --> Stage2
+    Stage2 --> Stage3
+```
+
+### Stage-by-Stage Processing
+
+#### Stage 1: OCR Ingestion
+- **Action**: Extract text from PDF pages using olmOCR-2
+- **Storage**: `pages.original_content` column in DuckDB
+- **Memory**: None at this stage
+
+#### Stage 2: Terminology Extraction
+After OCR completes, terminology is extracted and indexed:
+
+1. **Term Extraction**: Frequency-based extraction from all pages
+2. **FTS Indexing**: Create BM25 index for keyword search
+3. **Embedding Generation**: Generate embeddings using sentence-transformers (multilingual model)
+4. **VSS Indexing**: Create HNSW index for semantic search
+
+```sql
+-- FTS Index (already implemented)
+PRAGMA create_fts_index('terminology', 'id', 'term', 'context')
+
+-- VSS Index (already implemented)
+CREATE INDEX idx_terminology_embedding_hnsw
+ON terminology USING HNSW (embedding)
+WITH (metric = 'cosine')
+```
+
+#### Stage 3: Translation with Memory (Page-by-Page)
+
+**Why Page-by-Page?** Translation is done page-by-page (not batch) because:
+1. **Context Boundaries**: Each page has specific context that affects translation
+2. **Hallucination Prevention**: Smaller context windows reduce LLM errors
+3. **Checkpoint/Resume**: If translation fails, we can resume from the last page
+4. **Memory Updates**: Each page's translation decisions inform future pages
+
+**Context Window for Each Page:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    LLM Context Window                        │
+├─────────────────────────────────────────────────────────────┤
+│ 1. Document Glossary (from terminology + memory_store)      │
+│    - Terms with approved translations                        │
+│    - Translation decisions from previous pages               │
+│                                                              │
+│ 2. Previous Page Summary (from memory_store)                │
+│    - Brief summary of page N-1                              │
+│    - Key entities mentioned                                  │
+│                                                              │
+│ 3. Current Page Content                                      │
+│    - Full original text to translate                        │
+│                                                              │
+│ 4. Next Page Preview (first 500 chars)                      │
+│    - Context for continuation                               │
+│                                                              │
+│ 5. Similar Terms (from hybrid search)                       │
+│    - Semantically similar terms and their translations      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Memory Store Schema
+
+```sql
+CREATE TABLE memory_store (
+    id INTEGER PRIMARY KEY,
+    namespace VARCHAR NOT NULL,      -- e.g., "documents/1/glossary"
+    key VARCHAR NOT NULL,            -- e.g., "regulation"
+    value JSON NOT NULL,             -- {"term": "...", "translation": "..."}
+    embedding FLOAT[],               -- For semantic search
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    UNIQUE(namespace, key)
+);
+```
+
+**Namespace Organization:**
+- `documents/{doc_id}/glossary` - Translation decisions
+- `documents/{doc_id}/pages` - Page summaries
+- `documents/{doc_id}/context` - Document-level context
+
+### Search Strategy
+
+**Hybrid Search** combines FTS and VSS for best results:
+
+```python
+def search_terms_hybrid(query, query_embedding, fts_weight=0.5):
+    # 1. FTS search (BM25) - exact/keyword matching
+    fts_results = search_terms_fts(query)
+
+    # 2. VSS search (cosine) - semantic matching
+    semantic_results = search_terms_semantic(query_embedding)
+
+    # 3. Combine with weighted scoring
+    combined_score = (fts_weight * fts_norm) + ((1 - fts_weight) * semantic_norm)
+```
+
+### LLM Model Recommendations
+
+| Model | Context | Cost | Best For |
+|-------|---------|------|----------|
+| **anthropic/claude-3.5-sonnet** (current) | 200K | $3/$15 per 1M | Best quality, current default |
+| google/gemini-2.5-flash | 1M | $0.15/$0.60 per 1M | Large docs, cost-effective |
+| google/gemini-2.0-flash-lite | 1M | $0.075/$0.30 per 1M | Budget option |
+| meta-llama/llama-4-scout | 10M | $0.25/$0.70 per 1M | Massive context |
+
+**Current Implementation**: Uses `anthropic/claude-3.5-sonnet` as default, configurable via `config.yaml`.
+
+**Recommendation for Future**: Consider `google/gemini-2.5-flash` for:
+- Documents with 50+ pages (can fit entire document in context)
+- Cost reduction (20x cheaper than Claude)
+- Multi-document processing
 
 ---
 
