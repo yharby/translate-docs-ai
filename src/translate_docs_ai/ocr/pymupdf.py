@@ -4,10 +4,12 @@ PyMuPDF-based text extraction for native PDFs.
 Uses pymupdf4llm for markdown-formatted output.
 """
 
-from __future__ import annotations
-
+import os
 from pathlib import Path
 from typing import Any
+
+# Suppress "Consider using pymupdf_layout" message before importing pymupdf4llm
+os.environ["PYMUPDF_SUGGEST_LAYOUT_ANALYZER"] = "0"
 
 import fitz  # PyMuPDF
 import pymupdf4llm
