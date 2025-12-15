@@ -964,8 +964,8 @@ def run(
                 export_document_to_dir(doc, out_dir)
             console.print()
 
-    # Determine which documents need processing (pending + in-progress)
-    docs_to_process = pending_docs + in_progress_docs
+    # Determine which documents need processing (in-progress first to resume, then pending)
+    docs_to_process = in_progress_docs + pending_docs
 
     if not docs_to_process:
         console.print("[green]All documents already completed![/green]")

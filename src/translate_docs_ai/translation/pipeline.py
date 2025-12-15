@@ -585,14 +585,17 @@ class TranslationPipeline:
             # Sort by page number
             pages_to_translate.sort(key=lambda p: p.page_number)
             total_to_translate = len(pages_to_translate)
+            total_pages = state["total_pages"]
+            pages_skipped = total_pages - total_to_translate
 
-            for idx, page in enumerate(pages_to_translate):
-                # Report progress for each page
+            for page in pages_to_translate:
+                # Report progress for each page (show actual page number, not index)
+                # page.page_number is 0-indexed, so +1 for display
                 self._report_progress(
                     stage="translation",
                     stage_display="Translating pages",
-                    page_current=idx + 1,
-                    page_total=total_to_translate,
+                    page_current=page.page_number + 1,
+                    page_total=total_pages,
                 )
 
                 try:
@@ -643,10 +646,13 @@ class TranslationPipeline:
                     )
 
             # Log completion
+            trans_msg = f"Translation completed: {pages_translated}/{total_to_translate} pages"
+            if pages_skipped > 0:
+                trans_msg += f" ({pages_skipped} pages resumed from previous run)"
             self.db.log(
                 level="INFO",
                 stage="translation",
-                message=f"Translation completed: {pages_translated}/{len(pages_to_translate)} pages",
+                message=trans_msg,
                 document_id=document_id,
             )
 
