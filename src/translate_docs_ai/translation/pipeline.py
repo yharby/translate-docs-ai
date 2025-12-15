@@ -22,7 +22,11 @@ from translate_docs_ai.config import ProcessingMode
 from translate_docs_ai.database import Database, Page, Stage, Status
 from translate_docs_ai.memory import DuckDBStore
 from translate_docs_ai.ocr import DeepInfraOCR, PyMuPDFExtractor
-from translate_docs_ai.terminology import LLMTerminologyExtractor, TerminologyExtractor
+from translate_docs_ai.terminology import (
+    GlossaryDetector,
+    LLMTerminologyExtractor,
+    TerminologyExtractor,
+)
 from translate_docs_ai.terminology.embeddings import EmbeddingGenerator
 from translate_docs_ai.translation.search_tools import TerminologySearchTools
 from translate_docs_ai.translation.translator import PageTranslator
@@ -197,6 +201,9 @@ class TranslationPipeline:
             min_frequency=self.config.min_term_frequency,
             max_terms=self.config.max_terms,
         )
+
+        # Glossary Detector (extracts from document's glossary/terminology pages)
+        self.glossary_detector = GlossaryDetector(db=self.db)
 
         # Embeddings (optional, for semantic search)
         self.embedding_generator: EmbeddingGenerator | None = None
@@ -469,11 +476,13 @@ class TranslationPipeline:
         """Extract and process terminology using hybrid approach.
 
         Strategy (token-efficient):
+        0. Detect glossary pages in document (highest priority, pre-approved terms)
         1. Use frequency-based extraction to identify candidate terms (no LLM cost)
         2. Generate embeddings for semantic deduplication (local model)
         3. Use LLM only for translating the top filtered terms (minimal tokens)
         """
         document_id = state["document_id"]
+        source_lang = state["source_lang"]
         target_lang = state["target_lang"]
 
         # Report terminology extraction start
@@ -483,6 +492,28 @@ class TranslationPipeline:
         )
 
         try:
+            # Step 0: Detect and extract from glossary pages (highest priority)
+            # These terms are pre-approved since they come from the document's
+            # official glossary/terminology section
+            glossary_terms = self.glossary_detector.extract_and_save_glossary(
+                document_id=document_id,
+                source_lang=source_lang,
+                target_lang=target_lang,
+            )
+
+            if glossary_terms:
+                self._report_progress(
+                    stage="terminology",
+                    stage_display="Found document glossary",
+                    detail=f"{len(glossary_terms)} terms from glossary pages",
+                )
+                self.db.log(
+                    level="INFO",
+                    stage="terminology",
+                    message=f"Extracted {len(glossary_terms)} terms from glossary pages",
+                    document_id=document_id,
+                )
+
             # Step 1: Frequency-based extraction (fast, no API cost)
             terms = self.term_extractor.extract_from_document(document_id)
 
@@ -492,6 +523,9 @@ class TranslationPipeline:
                 message=f"Frequency extraction found {len(terms)} candidate terms",
                 document_id=document_id,
             )
+
+            # Combine counts (glossary terms are already in DB)
+            total_terms = len(glossary_terms) + len(terms)
 
             # Step 2: Generate embeddings for semantic search/deduplication
             embeddings_generated = 0
@@ -545,32 +579,40 @@ class TranslationPipeline:
                 document_id=document_id,
                 stage=Stage.TERMINOLOGY_EXTRACT,
                 state_data={
-                    "terms_count": len(terms),
+                    "glossary_terms": len(glossary_terms),
+                    "frequency_terms": len(terms),
+                    "total_terms": total_terms,
                     "embeddings_generated": embeddings_generated,
                     "terms_translated": terms_translated,
                 },
             )
 
             # Log completion
+            glossary_info = f" ({len(glossary_terms)} from glossary)" if glossary_terms else ""
             self.db.log(
                 level="INFO",
                 stage="terminology",
-                message=f"Extracted {len(terms)} terms, {embeddings_generated} embeddings, {terms_translated} translations",
+                message=f"Extracted {total_terms} terms{glossary_info}, "
+                f"{embeddings_generated} embeddings, {terms_translated} translations",
                 document_id=document_id,
             )
 
             # Report completion with term count
+            detail = f"{total_terms} terms"
+            if glossary_terms:
+                detail += f" ({len(glossary_terms)} from glossary)"
+            detail += f", {terms_translated} translated"
             self._report_progress(
                 stage="terminology",
                 stage_display="Terminology extracted",
-                detail=f"{len(terms)} terms, {terms_translated} translated",
+                detail=detail,
             )
 
             return {
                 "current_stage": PipelineStage.REVIEW
                 if state["processing_mode"] == ProcessingMode.SEMI_AUTO.value
                 else PipelineStage.TRANSLATION,
-                "terms_extracted": len(terms),
+                "terms_extracted": total_terms,
                 "needs_review": state["processing_mode"] == ProcessingMode.SEMI_AUTO.value,
             }
 
