@@ -118,21 +118,39 @@ uv run translate-docs export --format docx --language en
 
 Semi-auto mode pauses after terminology extraction, exports terms to CSV for review, and waits for approval before continuing translation.
 
+**Option 1: Via config.yaml** (recommended for repeated use)
+```yaml
+# config.yaml
+processing:
+  mode: semi-auto  # Enable semi-auto mode
+```
+
 ```bash
-# 1. Start translation in semi-auto mode
+# Then just run normally - it will pause for review
+uv run translate-docs run config.yaml
+```
+
+**Option 2: Via CLI flag** (one-time override)
+```bash
 uv run translate-docs translate --all --mode semi-auto --source ar --target en
+```
+
+**Workflow:**
+```bash
+# 1. Run translation (pauses after terminology extraction)
+uv run translate-docs translate --all -c config.yaml
 # → Extracts terms, auto-translates them using LLM with context
-# → Exports CSV to ./translated/terms_*.csv
+# → Exports CSV to ./translated/review/terms_<docname>_doc<id>.csv
 # → Pauses and shows instructions
 
 # 2. Review the CSV file
-# - Open ./translated/terms_*.csv in a spreadsheet
+# - Open ./translated/review/terms_*.csv in a spreadsheet
 # - Review: original_term_ar, auto_translation_en columns
 # - Fill corrected_translation_en column where needed
 # - Leave empty to approve auto-translation as-is
 
 # 3. Import reviewed terms and continue
-uv run translate-docs approve --doc 1 --import ./translated/terms_*.csv
+uv run translate-docs approve --doc 1 --import ./translated/review/terms_*.csv
 # → Imports corrections, continues translation, exports results
 ```
 

@@ -617,12 +617,14 @@ def translate(
                         # Auto-export terms to CSV for review
                         terms_count = state.get("terms_extracted", 0)
                         output_dir = settings.paths.output_dir
-                        output_dir.mkdir(parents=True, exist_ok=True)
+                        # Store review CSVs in translated/review/ subfolder
+                        review_dir = output_dir / "review"
+                        review_dir.mkdir(parents=True, exist_ok=True)
                         safe_name = "".join(
                             c if c.isalnum() or c in "._- " else "_"
                             for c in Path(doc.file_name).stem
                         )
-                        csv_path = output_dir / f"terms_{safe_name}_doc{doc.id}.csv"
+                        csv_path = review_dir / f"terms_{safe_name}_doc{doc.id}.csv"
 
                         # Export terms to CSV
                         import csv as csv_module
@@ -1322,6 +1324,13 @@ def run(
                                 description="[green]Complete!",
                                 detail="",
                             )
+                        elif final_stage.value == "review":
+                            progress.update(
+                                stage_task,
+                                completed=60,
+                                description="[yellow]Awaiting review",
+                                detail="",
+                            )
                         elif final_stage.value == "error":
                             progress.update(
                                 stage_task,
@@ -1330,6 +1339,107 @@ def run(
                             )
 
                     console.print()
+
+                    # Handle semi-auto mode: pause for terminology review
+                    if state["current_stage"].value == "review":
+                        # Export terms to CSV for review
+                        import csv as csv_module
+
+                        terms_count = state.get("terms_extracted", 0)
+                        source_lang = settings.translation.source_language
+                        target_lang = settings.translation.target_language
+
+                        safe_name = "".join(
+                            c if c.isalnum() or c in "._- " else "_"
+                            for c in Path(doc.file_name).stem
+                        )
+                        # Store review CSVs in translated/review/ subfolder
+                        review_dir = out_dir / "review"
+                        review_dir.mkdir(parents=True, exist_ok=True)
+                        csv_path = review_dir / f"terms_{safe_name}_doc{doc.id}.csv"
+
+                        terms_list = db.get_document_terms(doc.id)
+                        if terms_list:
+                            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                                writer = csv_module.writer(f)
+                                writer.writerow(
+                                    [
+                                        "term_id",
+                                        f"original_term_{source_lang}",
+                                        "frequency",
+                                        f"auto_translation_{target_lang}",
+                                        f"corrected_translation_{target_lang}",
+                                    ]
+                                )
+                                for term in terms_list:
+                                    auto_trans = (
+                                        getattr(term, f"translation_{target_lang}", "") or ""
+                                    )
+                                    writer.writerow(
+                                        [term.id, term.term, term.frequency, auto_trans, ""]
+                                    )
+
+                        # Show review panel with instructions
+                        corr_col = f"corrected_translation_{target_lang}"
+                        console.print(
+                            Panel(
+                                f"[yellow]⏸ Terminology Review Required[/yellow]\n\n"
+                                f"[bold]Document:[/bold] {doc.file_name}\n"
+                                f"[bold]Terms extracted:[/bold] {terms_count}\n\n"
+                                f"[bold]CSV file:[/bold] [cyan]{csv_path.absolute()}[/cyan]\n\n"
+                                "[bold]Instructions:[/bold]\n"
+                                f"1. Open the CSV file and review the {source_lang} terms\n"
+                                f"2. Fill '{corr_col}' column where needed\n"
+                                "3. Leave empty to approve auto-translation as-is\n"
+                                "4. Save the file and return here\n",
+                                title="[bold blue]Semi-Auto Mode[/bold blue]",
+                                border_style="yellow",
+                            )
+                        )
+
+                        # Interactive prompt - wait for user to press Enter
+                        console.print(
+                            "[bold cyan]Press Enter to continue after reviewing the CSV "
+                            "(or type 'skip' to skip this document):[/bold cyan] ",
+                            end="",
+                        )
+                        user_input = input().strip().lower()
+
+                        if user_input == "skip":
+                            console.print("[yellow]⏭ Skipping document...[/yellow]\n")
+                            continue
+
+                        # Import corrections from CSV if user edited it
+                        if csv_path.exists():
+                            with open(csv_path, encoding="utf-8") as f:
+                                reader = csv_module.DictReader(f)
+                                corrections_imported = 0
+                                for row in reader:
+                                    corrected_col = f"corrected_translation_{target_lang}"
+                                    if row.get(corrected_col, "").strip():
+                                        term_id = int(row["term_id"])
+                                        correction = row[corrected_col].strip()
+                                        sql = (
+                                            f"UPDATE terminology "
+                                            f"SET translation_{target_lang} = ? WHERE id = ?"
+                                        )
+                                        db.conn.execute(sql, [correction, term_id])
+                                        corrections_imported += 1
+
+                            if corrections_imported > 0:
+                                console.print(
+                                    f"[green]✓ Imported {corrections_imported} "
+                                    "correction(s) from CSV[/green]\n"
+                                )
+
+                        # Approve review and continue pipeline
+                        console.print("[cyan]Continuing translation...[/cyan]\n")
+                        await pipeline.approve_review(doc.id)
+
+                        # Re-run pipeline to continue from where it left off
+                        state = await pipeline.process_document(
+                            doc.id, progress_callback=progress_callback
+                        )
 
                     # Show result and export immediately if successful
                     if state["current_stage"].value == "complete":
@@ -1349,7 +1459,7 @@ def run(
                             completed_doc = db.get_document(doc.id)
                             if completed_doc:
                                 export_document_to_dir(completed_doc, out_dir)
-                    else:
+                    elif state["current_stage"].value == "error":
                         console.print(f"[red]✗ Failed: {doc.file_name}[/red]")
                         for error in state.get("errors", []):
                             console.print(f"  [red]• {error}[/red]")

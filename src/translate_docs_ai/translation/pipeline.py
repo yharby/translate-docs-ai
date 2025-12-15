@@ -823,22 +823,33 @@ class TranslationPipeline:
 
         # Resume from checkpoint if available
         if checkpoint and checkpoint.state_data:
+            # Check if review was already approved (from approve_review() call)
+            review_approved = checkpoint.state_data.get("review_approved", False)
+
             # Determine starting stage from checkpoint
-            stage_map = {
-                Stage.OCR: PipelineStage.TERMINOLOGY,
-                Stage.TERMINOLOGY_EXTRACT: PipelineStage.REVIEW
-                if self.config.processing_mode == ProcessingMode.SEMI_AUTO
-                else PipelineStage.TRANSLATION,
-                Stage.PAGE_TRANSLATE: PipelineStage.EXPORT,
-                Stage.EXPORT: PipelineStage.COMPLETE,
-            }
-            initial_state["current_stage"] = stage_map.get(checkpoint.stage, PipelineStage.INIT)
+            if checkpoint.stage == Stage.TERMINOLOGY_EXTRACT:
+                # If review was approved, skip to translation; otherwise go to review
+                if review_approved:
+                    initial_state["current_stage"] = PipelineStage.TRANSLATION
+                    initial_state["review_approved"] = True
+                elif self.config.processing_mode == ProcessingMode.SEMI_AUTO:
+                    initial_state["current_stage"] = PipelineStage.REVIEW
+                else:
+                    initial_state["current_stage"] = PipelineStage.TRANSLATION
+            else:
+                stage_map = {
+                    Stage.OCR: PipelineStage.TERMINOLOGY,
+                    Stage.PAGE_TRANSLATE: PipelineStage.EXPORT,
+                    Stage.EXPORT: PipelineStage.COMPLETE,
+                }
+                initial_state["current_stage"] = stage_map.get(checkpoint.stage, PipelineStage.INIT)
+
             initial_state["current_page"] = checkpoint.page_number or 0
 
             self.db.log(
                 level="INFO",
                 stage="pipeline_resume",
-                message=f"Resuming from {checkpoint.stage.value}",
+                message=f"Resuming from {checkpoint.stage.value}, review_approved={review_approved}",
                 document_id=document_id,
             )
 
