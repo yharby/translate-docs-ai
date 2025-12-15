@@ -10,6 +10,7 @@ Provides stateful workflow for document translation with:
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, TypedDict
@@ -70,6 +71,21 @@ class PipelineState(TypedDict):
     # Control flags
     needs_review: bool
     review_approved: bool
+
+
+@dataclass
+class ProgressInfo:
+    """Progress information for callbacks."""
+
+    stage: str  # Current stage name (ocr, terminology, translation, etc.)
+    stage_display: str  # Human-readable stage description
+    page_current: int | None = None  # Current page number (1-indexed for display)
+    page_total: int | None = None  # Total pages
+    detail: str | None = None  # Additional detail message (e.g., "42 terms extracted")
+
+
+# Type alias for progress callback
+ProgressCallback = Callable[[ProgressInfo], None] | None
 
 
 @dataclass
@@ -252,6 +268,26 @@ class TranslationPipeline:
 
         return workflow
 
+    def _report_progress(
+        self,
+        stage: str,
+        stage_display: str,
+        page_current: int | None = None,
+        page_total: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Report progress via callback if set."""
+        if hasattr(self, "_progress_callback") and self._progress_callback:
+            self._progress_callback(
+                ProgressInfo(
+                    stage=stage,
+                    stage_display=stage_display,
+                    page_current=page_current,
+                    page_total=page_total,
+                    detail=detail,
+                )
+            )
+
     def _route_after_terminology(self, state: PipelineState) -> str:
         """Route after terminology extraction."""
         if state["processing_mode"] == ProcessingMode.SEMI_AUTO.value:
@@ -320,7 +356,28 @@ class TranslationPipeline:
                 document_id=document_id,
             )
 
-            for page_num in range(state["total_pages"]):
+            # Get existing pages for resume capability
+            existing_pages = {p.page_number: p for p in self.db.get_document_pages(document_id)}
+            pages_skipped = 0
+
+            total_pages = state["total_pages"]
+            for page_num in range(total_pages):
+                # Report progress for each page
+                self._report_progress(
+                    stage="ocr",
+                    stage_display="Extracting text (OCR)",
+                    page_current=page_num + 1,
+                    page_total=total_pages,
+                )
+
+                # Check if page already exists with content (for resume)
+                existing_page = existing_pages.get(page_num)
+                if existing_page and existing_page.original_content:
+                    # Page already OCR'd, skip and use existing content
+                    ocr_results[page_num] = existing_page.original_content
+                    pages_skipped += 1
+                    continue
+
                 try:
                     if use_native and self.pymupdf:
                         # Use native PDF text extraction
@@ -366,10 +423,15 @@ class TranslationPipeline:
                     )
 
             # Log completion
+            ocr_msg = (
+                f"OCR completed: {len(ocr_results)}/{state['total_pages']} pages using {ocr_method}"
+            )
+            if pages_skipped > 0:
+                ocr_msg += f" ({pages_skipped} pages resumed from previous run)"
             self.db.log(
                 level="INFO",
                 stage="ocr",
-                message=f"OCR completed: {len(ocr_results)}/{state['total_pages']} pages using {ocr_method}",
+                message=ocr_msg,
                 document_id=document_id,
             )
 
@@ -397,6 +459,12 @@ class TranslationPipeline:
     async def _node_terminology(self, state: PipelineState) -> dict[str, Any]:
         """Extract and process terminology."""
         document_id = state["document_id"]
+
+        # Report terminology extraction start
+        self._report_progress(
+            stage="terminology",
+            stage_display="Extracting terminology",
+        )
 
         try:
             # Extract terms
@@ -438,6 +506,13 @@ class TranslationPipeline:
                 stage="terminology",
                 message=f"Extracted {len(terms)} terms, generated {embeddings_generated} embeddings",
                 document_id=document_id,
+            )
+
+            # Report completion with term count
+            self._report_progress(
+                stage="terminology",
+                stage_display="Terminology extracted",
+                detail=f"{len(terms)} terms found",
             )
 
             return {
@@ -509,8 +584,17 @@ class TranslationPipeline:
 
             # Sort by page number
             pages_to_translate.sort(key=lambda p: p.page_number)
+            total_to_translate = len(pages_to_translate)
 
-            for page in pages_to_translate:
+            for idx, page in enumerate(pages_to_translate):
+                # Report progress for each page
+                self._report_progress(
+                    stage="translation",
+                    stage_display="Translating pages",
+                    page_current=idx + 1,
+                    page_total=total_to_translate,
+                )
+
                 try:
                     result = await self.translator.translate_with_context(
                         page=page,
@@ -630,6 +714,7 @@ class TranslationPipeline:
         self,
         document_id: int,
         resume: bool = True,
+        progress_callback: ProgressCallback = None,
     ) -> PipelineState:
         """
         Process a document through the pipeline.
@@ -637,10 +722,13 @@ class TranslationPipeline:
         Args:
             document_id: Document ID to process.
             resume: Whether to resume from checkpoint if available.
+            progress_callback: Optional callback for progress updates.
 
         Returns:
             Final pipeline state.
         """
+        # Store callback for use in nodes
+        self._progress_callback = progress_callback
         # Check for existing checkpoint
         checkpoint = None
         if resume:

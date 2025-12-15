@@ -8,7 +8,13 @@ Provides:
 """
 
 from translate_docs_ai.translation.context import ContextBuilder
-from translate_docs_ai.translation.pipeline import TranslationPipeline
+from translate_docs_ai.translation.pipeline import PipelineConfig, ProgressInfo, TranslationPipeline
 from translate_docs_ai.translation.translator import PageTranslator
 
-__all__ = ["PageTranslator", "TranslationPipeline", "ContextBuilder"]
+__all__ = [
+    "PageTranslator",
+    "TranslationPipeline",
+    "PipelineConfig",
+    "ProgressInfo",
+    "ContextBuilder",
+]

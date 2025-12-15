@@ -846,10 +846,12 @@ def run(
         console.print("[yellow]No documents to process[/yellow]")
         return
 
-    # Step 2: Translate
-    console.print("[bold cyan]Step 2: Processing documents[/bold cyan]\n")
-
-    from translate_docs_ai.translation.pipeline import PipelineConfig, TranslationPipeline
+    from translate_docs_ai.export import DOCXExporter, MarkdownExporter, PDFExporter
+    from translate_docs_ai.translation.pipeline import (
+        PipelineConfig,
+        ProgressInfo,
+        TranslationPipeline,
+    )
 
     def map_ocr_model(model_name: str) -> str:
         model_map = {
@@ -872,96 +874,235 @@ def run(
         ocr_fallback_model=map_ocr_model(settings.ocr.fallback_model.value),
     )
 
+    # Helper function to sanitize filename for directory name
+    def sanitize_dirname(name: str) -> str:
+        """Create safe directory name from document filename."""
+        stem = Path(name).stem
+        return "".join(c if c.isalnum() or c in "._- " else "_" for c in stem)
+
+    # Helper function to check if document is already exported
+    def is_exported(doc, base_output_dir: Path) -> bool:
+        """Check if document has already been exported."""
+        doc_dir = base_output_dir / sanitize_dirname(doc.file_name)
+        if not doc_dir.exists():
+            return False
+        # Check if any export files exist
+        export_files = list(doc_dir.glob("*.*"))
+        return len(export_files) > 0
+
+    # Helper function to export a single document to its own directory
+    def export_document_to_dir(doc, base_output_dir: Path) -> None:
+        """Export document to a directory named after the source file."""
+        export_lang = settings.translation.target_language
+        source_lang = settings.translation.source_language
+
+        # Create document-specific output directory
+        doc_dir = base_output_dir / sanitize_dirname(doc.file_name)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+
+        exported_formats = []
+        export_errors = []
+
+        if settings.export.markdown:
+            exporter = MarkdownExporter(db, doc_dir)
+            result = exporter.export_document(
+                doc,
+                language=export_lang,
+                combined=settings.export.markdown_combined,
+                source_lang=source_lang,
+            )
+            if result.success:
+                exported_formats.append("MD")
+            elif result.error:
+                export_errors.append(f"MD: {result.error}")
+
+        if settings.export.pdf:
+            exporter = PDFExporter(db, doc_dir)
+            result = exporter.export_document(doc, language=export_lang, source_lang=source_lang)
+            if result.success:
+                exported_formats.append("PDF")
+            elif result.error:
+                export_errors.append(f"PDF: {result.error}")
+
+        if settings.export.docx:
+            exporter = DOCXExporter(db, doc_dir)
+            result = exporter.export_document(doc, language=export_lang, source_lang=source_lang)
+            if result.success:
+                exported_formats.append("DOCX")
+            elif result.error:
+                export_errors.append(f"DOCX: {result.error}")
+
+        if exported_formats:
+            console.print(f"  [dim]Exported: {', '.join(exported_formats)} → {doc_dir.name}/[/dim]")
+        if export_errors:
+            for err in export_errors:
+                console.print(f"  [yellow]⚠ {err}[/yellow]")
+
+    out_dir = settings.paths.output_dir
+
+    # Categorize documents by status
+    completed_docs = [d for d in documents if d.status == Status.COMPLETED]
+    in_progress_docs = [d for d in documents if d.status == Status.IN_PROGRESS]
+    pending_docs = [d for d in documents if d.status == Status.PENDING]
+    failed_docs = [d for d in documents if d.status == Status.FAILED]
+
+    # Show status summary
+    console.print(
+        f"[dim]Status: {len(completed_docs)} completed, {len(in_progress_docs)} in-progress, "
+        f"{len(pending_docs)} pending, {len(failed_docs)} failed[/dim]\n"
+    )
+
+    # Step 2a: Export any completed documents that haven't been exported yet
+    if completed_docs and settings.export.auto_export:
+        unexported = [d for d in completed_docs if not is_exported(d, out_dir)]
+        if unexported:
+            console.print(
+                f"[bold cyan]Exporting {len(unexported)} previously completed document(s)...[/bold cyan]\n"
+            )
+            for doc in unexported:
+                console.print(f"  [green]✓[/green] {doc.file_name}")
+                export_document_to_dir(doc, out_dir)
+            console.print()
+
+    # Determine which documents need processing (pending + in-progress)
+    docs_to_process = pending_docs + in_progress_docs
+
+    if not docs_to_process:
+        console.print("[green]All documents already completed![/green]")
+        if settings.export.auto_export:
+            console.print(f"[green]Output saved to: {out_dir}[/green]")
+        console.print("\n[bold green]Done![/bold green]")
+        return
+
+    # Step 2b: Process pending and in-progress documents
+    console.print(f"[bold cyan]Step 2: Processing {len(docs_to_process)} document(s)[/bold cyan]\n")
+
     async def process_all():
-        for doc_idx, doc in enumerate(documents):
-            doc_info = Table(show_header=False, box=None, padding=(0, 1))
-            doc_info.add_column("", style="bold")
-            doc_info.add_column("")
-            doc_info.add_row("Document", f"[cyan]{doc.file_name}[/cyan]")
-            doc_info.add_row("Pages", str(doc.total_pages))
-            doc_info.add_row("Progress", f"{doc_idx + 1}/{len(documents)}")
-            console.print(Panel(doc_info, title="[bold]Processing[/bold]", border_style="cyan"))
+        total_to_process = len(docs_to_process)
+        for doc_idx, doc in enumerate(docs_to_process):
+            # Show resuming status for in-progress documents
+            status_hint = " [yellow](resuming)[/yellow]" if doc.status == Status.IN_PROGRESS else ""
+
+            # Document header with compact info
+            console.print(
+                Panel(
+                    f"[cyan]{doc.file_name}[/cyan]{status_hint}\n"
+                    f"[dim]Pages: {doc.total_pages} | Document {doc_idx + 1}/{total_to_process}[/dim]",
+                    title="[bold]Processing[/bold]",
+                    border_style="cyan",
+                )
+            )
 
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[bold blue]{task.description}"),
                 BarColumn(complete_style="green", finished_style="green"),
                 TaskProgressColumn(),
+                TextColumn("[dim]{task.fields[detail]}[/dim]"),
                 TimeElapsedColumn(),
                 console=console,
                 transient=False,
             ) as progress:
-                stage_task = progress.add_task("[cyan]Starting pipeline...", total=5)
+                # Create task with detail field
+                stage_task = progress.add_task("[cyan]Initializing...", total=100, detail="")
+
+                # Map stages to progress percentages
+                stage_progress = {
+                    "init": 5,
+                    "ocr": 40,
+                    "terminology": 60,
+                    "translation": 90,
+                    "export": 95,
+                    "complete": 100,
+                }
+
+                def make_progress_callback(task_id, stage_pct_map):
+                    """Create progress callback with bound variables."""
+
+                    def callback(info: ProgressInfo) -> None:
+                        """Update progress display based on pipeline callback."""
+                        # Build detail string (page info or other detail)
+                        if info.page_current and info.page_total:
+                            detail = f"page {info.page_current}/{info.page_total}"
+                        else:
+                            detail = info.detail or ""
+
+                        # Get progress percentage based on stage
+                        pct = stage_pct_map.get(info.stage, 0)
+
+                        # Update progress bar
+                        progress.update(
+                            task_id,
+                            completed=pct,
+                            description=f"[cyan]{info.stage_display}",
+                            detail=detail,
+                        )
+
+                    return callback
+
+                progress_callback = make_progress_callback(stage_task, stage_progress)
 
                 try:
                     pipeline = TranslationPipeline(db, pipeline_config)
-                    progress.update(stage_task, description="[cyan]Processing...")
 
-                    state = await pipeline.process_document(doc.id)
+                    # Process with callback
+                    state = await pipeline.process_document(
+                        doc.id, progress_callback=progress_callback
+                    )
 
+                    # Final update based on result
                     final_stage = state.get("current_stage")
                     if final_stage and hasattr(final_stage, "value"):
                         if final_stage.value == "complete":
-                            progress.update(stage_task, completed=5, description="[green]Complete!")
+                            progress.update(
+                                stage_task,
+                                completed=100,
+                                description="[green]Complete!",
+                                detail="",
+                            )
                         elif final_stage.value == "error":
-                            progress.update(stage_task, description="[red]Error occurred")
+                            progress.update(
+                                stage_task,
+                                description="[red]Error occurred",
+                                detail="",
+                            )
 
                     console.print()
+
+                    # Show result and export immediately if successful
                     if state["current_stage"].value == "complete":
-                        console.print(f"[green]✓ Completed: {doc.file_name}[/green]")
+                        pages_ocr = len(state.get("ocr_results", {}))
+                        terms = state.get("terms_extracted", 0)
+                        pages_translated = state.get("pages_translated", 0)
+
+                        console.print(
+                            f"[green]✓ Completed:[/green] "
+                            f"[dim]{pages_ocr} pages OCR'd, {terms} terms, "
+                            f"{pages_translated} pages translated[/dim]"
+                        )
+
+                        # Export immediately after document completes
+                        if settings.export.auto_export:
+                            # Refresh document from DB to get updated status
+                            completed_doc = db.get_document(doc.id)
+                            if completed_doc:
+                                export_document_to_dir(completed_doc, out_dir)
                     else:
                         console.print(f"[red]✗ Failed: {doc.file_name}[/red]")
                         for error in state.get("errors", []):
                             console.print(f"  [red]• {error}[/red]")
 
                 except Exception as e:
-                    progress.update(stage_task, description="[red]Error")
+                    progress.update(stage_task, description="[red]Error", detail="")
                     console.print(f"\n[red]Error: {e}[/red]")
 
             console.print()
 
     asyncio.run(process_all())
 
-    # Step 3: Export (if auto_export enabled)
+    # Summary
     if settings.export.auto_export:
-        console.print("[bold cyan]Step 3: Exporting translations[/bold cyan]\n")
-
-        from translate_docs_ai.export import DOCXExporter, MarkdownExporter, PDFExporter
-
-        out_dir = settings.paths.output_dir
-        completed_docs = db.get_all_documents(Status.COMPLETED)
-
-        if completed_docs:
-            export_lang = settings.translation.target_language
-            source_lang = settings.translation.source_language
-
-            # Export in enabled formats (pass source_lang for RTL/LTR table fallback)
-            if settings.export.markdown:
-                exporter = MarkdownExporter(db, out_dir)
-                for doc in completed_docs:
-                    exporter.export_document(
-                        doc,
-                        language=export_lang,
-                        combined=settings.export.markdown_combined,
-                        source_lang=source_lang,
-                    )
-                console.print("[green]✓ Exported Markdown[/green]")
-
-            if settings.export.pdf:
-                exporter = PDFExporter(db, out_dir)
-                for doc in completed_docs:
-                    exporter.export_document(doc, language=export_lang, source_lang=source_lang)
-                console.print("[green]✓ Exported PDF[/green]")
-
-            if settings.export.docx:
-                exporter = DOCXExporter(db, out_dir)
-                for doc in completed_docs:
-                    exporter.export_document(doc, language=export_lang, source_lang=source_lang)
-                console.print("[green]✓ Exported DOCX[/green]")
-
-            console.print(f"\n[green]Output saved to: {out_dir}[/green]")
-        else:
-            console.print("[yellow]No completed documents to export[/yellow]")
+        console.print(f"[green]Output saved to: {settings.paths.output_dir}[/green]")
 
     console.print("\n[bold green]Done![/bold green]")
 

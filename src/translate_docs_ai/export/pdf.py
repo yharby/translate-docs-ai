@@ -7,6 +7,7 @@ Handles RTL to LTR table column reversal for proper reading direction.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +15,25 @@ from typing import TYPE_CHECKING
 from markdown_pdf import MarkdownPdf, Section
 
 from translate_docs_ai.export.table_utils import process_content_tables
+
+
+def _sanitize_markdown_for_pdf(content: str) -> str:
+    """
+    Sanitize markdown content to avoid PDF generation issues.
+
+    Removes or fixes problematic patterns like:
+    - Anchor links that reference non-existent sections
+    - Malformed internal links
+    """
+    # Replace anchor links [text](#anchor) with just the text
+    # These cause "No destination with id=X" errors in markdown-pdf
+    content = re.sub(r"\[([^\]]+)\]\(#[^)]*\)", r"\1", content)
+
+    # Also handle empty links [text]()
+    content = re.sub(r"\[([^\]]+)\]\(\s*\)", r"\1", content)
+
+    return content
+
 
 if TYPE_CHECKING:
     from translate_docs_ai.database import Database, Document
@@ -267,6 +287,8 @@ class PDFExporter:
                 # Process tables: convert HTML to MD and reverse columns for RTL→LTR
                 if source_lang:
                     content = process_content_tables(content, source_lang, language)
+                # Sanitize markdown to avoid PDF generation issues (anchor links, etc.)
+                content = _sanitize_markdown_for_pdf(content)
                 translated_pages.append((page.page_number, content))
 
         if not translated_pages:
