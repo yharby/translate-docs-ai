@@ -440,6 +440,12 @@ def translate(
     all_docs: bool = typer.Option(False, "--all", "-a", help="Process all pending"),
     config: Path | None = typer.Option(None, "--config", "-c", help="Config file"),
     mode: str = typer.Option("auto", "--mode", "-m", help="Processing mode: auto or semi-auto"),
+    provider: str | None = typer.Option(
+        None,
+        "--provider",
+        "-p",
+        help="LLM provider: openrouter (pay-per-token) or claude-code (subscription)",
+    ),
     source: str | None = typer.Option(
         None, "--source", "-s", help="Source language (default: from config)"
     ),
@@ -448,6 +454,8 @@ def translate(
     ),
 ) -> None:
     """Translate documents."""
+    from translate_docs_ai.config import LLMProvider
+
     settings = get_settings(config)
     db = get_database(settings)
 
@@ -455,14 +463,30 @@ def translate(
     source_lang = source or settings.translation.source_language
     target_lang = target or settings.translation.target_language
 
+    # Determine LLM provider (CLI flag overrides config)
+    if provider:
+        try:
+            llm_provider = LLMProvider(provider.lower().replace("_", "-"))
+        except ValueError:
+            console.print(f"[red]Invalid provider: {provider}[/red]")
+            console.print("Valid options: openrouter, claude-code")
+            raise typer.Exit(1) from None
+    else:
+        llm_provider = settings.translation.provider
+
     # Display config being used
     _display_config(settings, config)
 
-    # Validate API keys
-    if not settings.translation.openrouter_api_key:
+    # Validate API keys based on provider
+    if llm_provider == LLMProvider.OPENROUTER and not settings.translation.openrouter_api_key:
         console.print("[red]OpenRouter API key not configured[/red]")
         console.print("Set OPENROUTER_API_KEY environment variable or add to config")
+        console.print("[dim]Or use --provider claude-code to use your Claude subscription[/dim]")
         raise typer.Exit(1)
+    elif llm_provider == LLMProvider.CLAUDE_CODE:
+        console.print(
+            "[green]Using Claude Code provider (subscription-based, no per-token cost)[/green]"
+        )
 
     # Get documents
     if document_id:
@@ -500,6 +524,7 @@ def translate(
         return model_map.get(model_name, model_name)
 
     pipeline_config = PipelineConfig(
+        llm_provider=llm_provider,
         openrouter_api_key=settings.translation.openrouter_api_key,
         deepinfra_api_key=settings.ocr.deepinfra_api_key,
         processing_mode=processing_mode,
@@ -761,6 +786,7 @@ def approve(
         return model_map.get(model_name, model_name)
 
     pipeline_config = PipelineConfig(
+        llm_provider=settings.translation.provider,
         openrouter_api_key=settings.translation.openrouter_api_key,
         deepinfra_api_key=settings.ocr.deepinfra_api_key,
         source_lang=settings.translation.source_language,
@@ -1081,11 +1107,22 @@ def run(
     # Display config
     _display_config(settings, config_file)
 
-    # Validate API keys
-    if not settings.translation.openrouter_api_key:
+    # Import LLMProvider for validation
+    from translate_docs_ai.config import LLMProvider
+
+    # Validate API keys based on provider
+    llm_provider = settings.translation.provider
+    if llm_provider == LLMProvider.OPENROUTER and not settings.translation.openrouter_api_key:
         console.print("[red]OpenRouter API key not configured[/red]")
         console.print("Set OPENROUTER_API_KEY environment variable or in .env file")
+        console.print(
+            "[dim]Or set provider: claude-code in config to use your Claude subscription[/dim]"
+        )
         raise typer.Exit(1)
+    elif llm_provider == LLMProvider.CLAUDE_CODE:
+        console.print(
+            "[green]Using Claude Code provider (subscription-based, no per-token cost)[/green]"
+        )
 
     if settings.ocr.force_ocr and not settings.ocr.deepinfra_api_key:
         console.print("[red]DeepInfra API key not configured (required for OCR)[/red]")
@@ -1126,6 +1163,7 @@ def run(
         return model_map.get(model_name, model_name)
 
     pipeline_config = PipelineConfig(
+        llm_provider=llm_provider,
         openrouter_api_key=settings.translation.openrouter_api_key,
         deepinfra_api_key=settings.ocr.deepinfra_api_key,
         processing_mode=settings.processing.mode,

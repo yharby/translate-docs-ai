@@ -16,6 +16,7 @@ classifiers = [
     "Topic :: Text Processing :: Linguistic",
 ]
 dependencies = [
+    "claude-agent-sdk>=0.1.17",
     "duckdb>=1.4.3",
     "httpx>=0.28.1",
     "langchain-core>=1.2.0",

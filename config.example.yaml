@@ -30,6 +30,12 @@ ocr:
 
 # Translation settings
 translation:
+  # LLM Provider: "openrouter" (pay-per-token) or "claude-code" (use your subscription)
+  # claude-code uses your Claude Pro/Max subscription - no per-token charges!
+  provider: openrouter  # Change to "claude-code" to use your Claude subscription
+  # Model selection:
+  #   For claude-code: sonnet, opus, haiku (or: default, fast, quality)
+  #   For openrouter: anthropic/claude-3.5-sonnet, deepseek/deepseek-chat, etc.
   default_model: anthropic/claude-3.5-sonnet
   source_language: ar
   target_language: en
@@ -37,7 +43,7 @@ translation:
   max_tokens_per_request: 8192
   min_term_frequency: 3
   max_terms: 200
-  # API key for OpenRouter
+  # API key for OpenRouter (only required if provider is "openrouter")
   openrouter_api_key: ${OPENROUTER_API_KEY}
 
   # Context settings for translation

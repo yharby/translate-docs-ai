@@ -18,7 +18,7 @@ from typing import Annotated, Any, TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from translate_docs_ai.config import ProcessingMode
+from translate_docs_ai.config import LLMProvider, ProcessingMode
 from translate_docs_ai.database import Database, Page, Stage, Status
 from translate_docs_ai.memory import DuckDBStore
 from translate_docs_ai.ocr import DeepInfraOCR, PyMuPDFExtractor
@@ -96,8 +96,11 @@ ProgressCallback = Callable[[ProgressInfo], None] | None
 class PipelineConfig:
     """Configuration for the translation pipeline."""
 
-    # API keys
-    openrouter_api_key: str
+    # LLM Provider: "openrouter" (pay-per-token) or "claude-code" (subscription)
+    llm_provider: LLMProvider = LLMProvider.OPENROUTER
+
+    # API keys (openrouter_api_key only required if llm_provider is "openrouter")
+    openrouter_api_key: str | None = None
     deepinfra_api_key: str | None = None
 
     # Processing options
@@ -186,12 +189,19 @@ class TranslationPipeline:
             self.deepinfra_ocr = None
             self.deepinfra_fallback = None
 
+        # Determine if LLM is available based on provider
+        # Claude Code doesn't need API key, OpenRouter does
+        llm_available = (
+            self.config.llm_provider == LLMProvider.CLAUDE_CODE or self.config.openrouter_api_key
+        )
+
         # LLM-based Terminology Extractor (primary)
         self.llm_term_extractor: LLMTerminologyExtractor | None = None
-        if self.config.openrouter_api_key:
+        if llm_available:
             self.llm_term_extractor = LLMTerminologyExtractor(
-                api_key=self.config.openrouter_api_key,
                 db=self.db,
+                provider=self.config.llm_provider.value,
+                api_key=self.config.openrouter_api_key,
                 model=self.config.translation_model,
             )
 
@@ -231,10 +241,11 @@ class TranslationPipeline:
                 embedding_generator=self.embedding_generator,
             )
 
-        # Translation
+        # Translation - uses provider abstraction
         self.translator = PageTranslator(
-            api_key=self.config.openrouter_api_key,
             db=self.db,
+            provider=self.config.llm_provider.value,
+            api_key=self.config.openrouter_api_key,
             model=self.config.translation_model,
         )
 

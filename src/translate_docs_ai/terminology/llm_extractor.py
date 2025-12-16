@@ -1,18 +1,19 @@
 """
-LLM-based terminology extraction using OpenRouter API.
+LLM-based terminology extraction using LLM providers.
 
 Uses language models to intelligently identify technical terms,
 domain-specific vocabulary, and generate translations.
+Supports multiple providers: OpenRouter (pay-per-token) and Claude Code (subscription).
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
-from openai import AsyncOpenAI
-
 from translate_docs_ai.database import Database, Term
+from translate_docs_ai.llm import LLMProviderType, create_llm_provider
 
 
 @dataclass
@@ -30,7 +31,11 @@ class LLMTerminologyExtractor:
     """
     Extract terminology using LLM for intelligent term identification.
 
-    Uses OpenRouter API to analyze document text and extract:
+    Supports multiple providers:
+    - OpenRouter: Pay-per-token access to Claude, GPT, Gemini, etc.
+    - Claude Code: Use your Claude Pro/Max subscription (no extra cost)
+
+    Extracts:
     - Technical terms and jargon
     - Domain-specific vocabulary
     - Acronyms and abbreviations
@@ -38,12 +43,26 @@ class LLMTerminologyExtractor:
     - Auto-generated translations
     """
 
+    # Model aliases for different providers
+    OPENROUTER_MODELS = {
+        "default": "anthropic/claude-3.5-sonnet",
+        "fast": "anthropic/claude-3-haiku",
+        "quality": "anthropic/claude-3-opus",
+    }
+
+    CLAUDE_CODE_MODELS = {
+        "default": "sonnet",
+        "fast": "haiku",
+        "quality": "opus",
+    }
+
     def __init__(
         self,
-        api_key: str,
         db: Database,
-        model: str = "anthropic/claude-3.5-sonnet",
-        base_url: str = "https://openrouter.ai/api/v1",
+        *,
+        provider: LLMProviderType | str = LLMProviderType.OPENROUTER,
+        api_key: str | None = None,
+        model: str = "default",
         max_terms_per_chunk: int = 50,
         chunk_size: int = 4000,  # Characters per chunk to avoid context limits
     ):
@@ -51,21 +70,32 @@ class LLMTerminologyExtractor:
         Initialize LLM terminology extractor.
 
         Args:
-            api_key: OpenRouter API key.
             db: Database instance.
+            provider: LLM provider type ("openrouter" or "claude-code").
+            api_key: API key (required for openrouter, ignored for claude-code).
             model: LLM model to use.
-            base_url: API base URL.
             max_terms_per_chunk: Maximum terms to extract per chunk.
             chunk_size: Maximum characters per text chunk.
         """
         self.db = db
-        self._model = model
         self._max_terms_per_chunk = max_terms_per_chunk
         self._chunk_size = chunk_size
 
-        self._client = AsyncOpenAI(
+        # Normalize provider type
+        if isinstance(provider, str):
+            provider = LLMProviderType(provider.lower().replace("_", "-"))
+
+        # Resolve model name based on provider
+        if provider == LLMProviderType.CLAUDE_CODE:
+            resolved_model = self.CLAUDE_CODE_MODELS.get(model, model)
+        else:
+            resolved_model = self.OPENROUTER_MODELS.get(model, model)
+
+        # Create LLM provider
+        self._provider = create_llm_provider(
+            provider,
             api_key=api_key,
-            base_url=base_url,
+            model=resolved_model,
             timeout=120.0,
         )
 
@@ -143,7 +173,8 @@ class LLMTerminologyExtractor:
             message=f"LLM extracted {len(terms)} terms from document",
             document_id=document_id,
             context={
-                "model": self._model,
+                "model": self._provider.model,
+                "provider": self._provider.name,
                 "chunks_processed": len(chunks),
                 "terms_extracted": len(terms),
             },
@@ -230,17 +261,14 @@ Text to analyze:
 {text}"""
 
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+            response = await self._provider.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 temperature=0.3,
                 max_tokens=4000,
             )
 
-            content = response.choices[0].message.content or "[]"
+            content = response.content or "[]"
 
             # Parse JSON response
             # Handle markdown code blocks if present
@@ -254,8 +282,6 @@ Text to analyze:
                 terms_data = json.loads(content)
             except json.JSONDecodeError:
                 # Try to extract JSON from response
-                import re
-
                 json_match = re.search(r"\[.*\]", content, re.DOTALL)
                 if json_match:
                     terms_data = json.loads(json_match.group())
@@ -365,17 +391,14 @@ Return format:
 {{"term1": "translation1", "term2": "translation2"}}"""
 
             try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                response = await self._provider.chat(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
                     temperature=0.3,
                     max_tokens=4000,
                 )
 
-                content = response.choices[0].message.content or "{}"
+                content = response.content or "{}"
 
                 # Parse response
                 content = content.strip()
@@ -387,8 +410,6 @@ Return format:
                     translations = json.loads(content)
                 except json.JSONDecodeError:
                     # Try to extract JSON object from response
-                    import re
-
                     json_match = re.search(r"\{.*\}", content, re.DOTALL)
                     if json_match:
                         translations = json.loads(json_match.group())

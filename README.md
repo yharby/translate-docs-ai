@@ -6,7 +6,8 @@ AI-powered document translation pipeline with OCR, terminology extraction, and m
 
 - **Smart OCR**: Uses olmOCR-2 via DeepInfra for accurate text extraction from PDFs
 - **Smart Terminology Extraction**: Hybrid approach combining frequency analysis with LLM-powered context-aware translation
-- **Context-Aware Translation**: Page-by-page translation with previous/next page context via OpenRouter LLMs
+- **Multi-Provider LLM Support**: Use your Claude Pro/Max subscription (no extra cost!) or OpenRouter (pay-per-token)
+- **Context-Aware Translation**: Page-by-page translation with previous/next page context
 - **Semi-Auto Mode**: Pause for terminology review with CSV export/import workflow
 - **RTL/LTR Support**: Automatic table column reversal when translating between RTL (Arabic, Hebrew) and LTR (English) languages
 - **Multi-Format Export**: Export to Markdown, PDF, and DOCX
@@ -61,6 +62,7 @@ cp config.example.yaml config.yaml
 2. Set your API keys in `.env` or environment:
 ```bash
 export DEEPINFRA_API_KEY="your-deepinfra-key"
+# Only needed if using OpenRouter provider:
 export OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
@@ -72,9 +74,13 @@ paths:
   output_dir: ./translated    # Output directory
 
 translation:
+  # LLM Provider: "claude-code" (subscription) or "openrouter" (pay-per-token)
+  provider: claude-code       # Use your Claude Pro/Max subscription!
+  # Models for claude-code: sonnet, opus, haiku
+  # Models for openrouter: anthropic/claude-3.5-sonnet, deepseek/deepseek-chat, etc.
+  default_model: sonnet
   source_language: ar         # Source language (ar, en, fr)
   target_language: en         # Target language
-  default_model: anthropic/claude-3.5-sonnet
 
 ocr:
   force_ocr: true            # Use OCR even for native PDFs
@@ -204,9 +210,57 @@ uv run translate-docs approve --doc 1 --import ./translated/review/terms_*.csv
 
 - **OCR**: olmOCR-2 via DeepInfra for document digitization
 - **Database**: DuckDB with FTS and VSS extensions for terminology management
-- **Translation**: OpenRouter API with Claude 3.5 Sonnet (configurable)
+- **LLM Providers**: Claude Code (subscription) or OpenRouter (pay-per-token)
 - **Pipeline**: LangGraph for stateful, checkpointable workflows
 - **Export**: Markdown, PDF (markdown-pdf), DOCX (python-docx)
+
+## LLM Providers
+
+The translation pipeline supports two LLM providers:
+
+### Claude Code (Recommended)
+
+Use your existing Claude Pro/Max subscription with **no per-token charges**:
+
+```yaml
+# config.yaml
+translation:
+  provider: claude-code
+  default_model: sonnet  # or opus, haiku
+```
+
+Or via CLI flag:
+```bash
+uv run translate-docs translate --all --provider claude-code
+```
+
+**Requirements:**
+- Claude Code CLI installed and authenticated (`claude login`)
+- Active Claude Pro ($20/mo) or Max ($100/mo) subscription
+
+**Benefits:**
+- No per-token API costs
+- Full 1M context window
+- Uses your existing subscription
+
+### OpenRouter (Pay-per-token)
+
+Access multiple LLMs (Claude, GPT-4, Gemini, DeepSeek) via OpenRouter:
+
+```yaml
+# config.yaml
+translation:
+  provider: openrouter
+  default_model: anthropic/claude-3.5-sonnet
+  openrouter_api_key: ${OPENROUTER_API_KEY}
+```
+
+**Available Models:**
+- `anthropic/claude-3.5-sonnet` (default)
+- `anthropic/claude-3-opus` (highest quality)
+- `anthropic/claude-3-haiku` (fastest)
+- `deepseek/deepseek-chat` (cost-effective)
+- `google/gemini-pro-1.5`
 
 ## Smart Terminology Extraction
 
@@ -252,6 +306,11 @@ translate-docs-ai/
       config.py           # YAML config management
       database.py         # DuckDB operations
       scanner.py          # Document scanner
+      llm/                # LLM provider abstraction
+         base.py         # Abstract LLMProvider interface
+         factory.py      # Provider factory
+         openrouter.py   # OpenRouter provider (pay-per-token)
+         claude_code.py  # Claude Code provider (subscription)
       ocr/
          deepinfra.py    # olmOCR via DeepInfra
          pymupdf.py      # Native PDF extraction
@@ -261,7 +320,7 @@ translate-docs-ai/
          embeddings.py   # Vector embeddings
       translation/
          pipeline.py     # LangGraph workflow
-         translator.py   # OpenRouter client
+         translator.py   # LLM-based translator
          context.py      # Context builder
       export/
           markdown.py     # MD exporter
@@ -280,15 +339,19 @@ translate-docs-ai/
 - PyMuPDF (fitz)
 - LangGraph
 - OpenAI SDK (for DeepInfra and OpenRouter)
+- Claude Agent SDK (for Claude Code provider)
 - Rich (CLI)
 - python-docx, markdown-pdf (export)
 
-## API Keys Required
+## API Keys & Requirements
 
-| Service | Purpose | Get Key |
-|---------|---------|---------|
-| DeepInfra | OCR (olmOCR-2) | [deepinfra.com](https://deepinfra.com) |
-| OpenRouter | Translation LLMs | [openrouter.ai](https://openrouter.ai) |
+| Service | Purpose | Required? | Get Key |
+|---------|---------|-----------|---------|
+| DeepInfra | OCR (olmOCR-2) | Yes (for OCR) | [deepinfra.com](https://deepinfra.com) |
+| Claude Code | Translation LLMs | If using `provider: claude-code` | [claude.ai/code](https://claude.ai/code) + subscription |
+| OpenRouter | Translation LLMs | If using `provider: openrouter` | [openrouter.ai](https://openrouter.ai) |
+
+**Note:** If you have a Claude Pro/Max subscription, use `provider: claude-code` - no OpenRouter API key needed!
 
 ## License
 

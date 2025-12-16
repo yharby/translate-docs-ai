@@ -1,18 +1,17 @@
 """
-Page translator using OpenRouter API.
+Page translator using LLM providers.
 
 Provides LLM-based translation with context awareness.
+Supports multiple providers: OpenRouter (pay-per-token) and Claude Code (subscription).
 """
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from openai import AsyncOpenAI
-
 from translate_docs_ai.database import Database, Page
+from translate_docs_ai.llm import LLMProviderType, create_llm_provider
 from translate_docs_ai.translation.context import (
     ContextBuilder,
     TranslationContext,
@@ -34,13 +33,15 @@ class TranslationResult:
 
 class PageTranslator:
     """
-    Translates document pages using OpenRouter API.
+    Translates document pages using LLM providers.
 
-    Supports multiple LLM providers through OpenRouter's unified API.
+    Supports multiple providers:
+    - OpenRouter: Pay-per-token access to Claude, GPT, Gemini, etc.
+    - Claude Code: Use your Claude Pro/Max subscription (no extra cost)
     """
 
-    # Recommended models for translation
-    MODELS = {
+    # Recommended models for OpenRouter
+    OPENROUTER_MODELS = {
         "default": "anthropic/claude-3.5-sonnet",
         "fast": "anthropic/claude-3-haiku",
         "quality": "anthropic/claude-3-opus",
@@ -48,12 +49,20 @@ class PageTranslator:
         "gemini": "google/gemini-pro-1.5",
     }
 
+    # Model aliases for Claude Code
+    CLAUDE_CODE_MODELS = {
+        "default": "sonnet",
+        "fast": "haiku",
+        "quality": "opus",
+    }
+
     def __init__(
         self,
-        api_key: str,
         db: Database,
+        *,
+        provider: LLMProviderType | str = LLMProviderType.OPENROUTER,
+        api_key: str | None = None,
         model: str = "default",
-        base_url: str = "https://openrouter.ai/api/v1",
         temperature: float = 0.3,
         max_tokens: int = 8192,
         timeout: float = 120.0,
@@ -63,25 +72,37 @@ class PageTranslator:
         Initialize page translator.
 
         Args:
-            api_key: OpenRouter API key.
             db: Database instance.
+            provider: LLM provider type ("openrouter" or "claude-code").
+            api_key: API key (required for openrouter, ignored for claude-code).
             model: Model key or full model name.
-            base_url: API base URL.
             temperature: Sampling temperature.
             max_tokens: Maximum output tokens.
             timeout: Request timeout in seconds.
             max_retries: Maximum retry attempts.
         """
         self.db = db
-        self._model = self.MODELS.get(model, model)
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._max_retries = max_retries
 
-        self._client = AsyncOpenAI(
+        # Normalize provider type
+        if isinstance(provider, str):
+            provider = LLMProviderType(provider.lower().replace("_", "-"))
+
+        # Resolve model name based on provider
+        if provider == LLMProviderType.CLAUDE_CODE:
+            resolved_model = self.CLAUDE_CODE_MODELS.get(model, model)
+        else:
+            resolved_model = self.OPENROUTER_MODELS.get(model, model)
+
+        # Create LLM provider
+        self._provider = create_llm_provider(
+            provider,
             api_key=api_key,
-            base_url=base_url,
+            model=resolved_model,
             timeout=timeout,
+            max_retries=max_retries,
         )
 
         self._context_builder = ContextBuilder(db)
@@ -89,7 +110,12 @@ class PageTranslator:
     @property
     def model(self) -> str:
         """Get current model name."""
-        return self._model
+        return self._provider.model
+
+    @property
+    def provider_name(self) -> str:
+        """Get provider name."""
+        return self._provider.name
 
     async def translate_page(
         self,
@@ -112,14 +138,12 @@ class PageTranslator:
         Returns:
             TranslationResult with translated content.
         """
-        import time
-
         if not page.original_content:
             return TranslationResult(
                 translated_content="",
                 source_tokens=0,
                 target_tokens=0,
-                model_used=self._model,
+                model_used=self._provider.model,
                 latency_ms=0,
             )
 
@@ -132,59 +156,34 @@ class PageTranslator:
             preserve_formatting=kwargs.get("preserve_formatting", True),
         )
 
-        # Call API with retry
-        start_time = time.perf_counter()
-        last_error = None
+        # Call LLM provider (retry logic is handled by the provider)
+        try:
+            response = await self._provider.chat(
+                system_prompt=self._get_system_prompt(source_lang, target_lang),
+                user_prompt=prompt,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
 
-        for attempt in range(self._max_retries):
-            try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": self._get_system_prompt(source_lang, target_lang),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=self._temperature,
-                    max_tokens=self._max_tokens,
-                )
+            return TranslationResult(
+                translated_content=response.content,
+                source_tokens=response.input_tokens,
+                target_tokens=response.output_tokens,
+                model_used=response.model,
+                latency_ms=response.latency_ms,
+                metadata=response.metadata,
+            )
 
-                latency_ms = (time.perf_counter() - start_time) * 1000
-
-                content = response.choices[0].message.content or ""
-                usage = response.usage
-
-                return TranslationResult(
-                    translated_content=content.strip(),
-                    source_tokens=usage.prompt_tokens if usage else 0,
-                    target_tokens=usage.completion_tokens if usage else 0,
-                    model_used=self._model,
-                    latency_ms=latency_ms,
-                    metadata={
-                        "finish_reason": response.choices[0].finish_reason,
-                        "attempt": attempt + 1,
-                    },
-                )
-
-            except Exception as e:
-                last_error = e
-                if attempt < self._max_retries - 1:
-                    # Exponential backoff
-                    await asyncio.sleep(2**attempt)
-
-                # Log retry
-                self.db.log(
-                    level="WARNING",
-                    stage="translation",
-                    message=f"Translation retry {attempt + 1}: {e}",
-                    page_id=page.id,
-                    context={"error": str(e)},
-                )
-
-        # All retries failed
-        raise last_error or Exception("Translation failed")
+        except Exception as e:
+            # Log error
+            self.db.log(
+                level="ERROR",
+                stage="translation",
+                message=f"Translation failed: {e}",
+                page_id=page.id,
+                context={"error": str(e), "provider": self._provider.name},
+            )
+            raise
 
     def _get_system_prompt(self, source_lang: str, target_lang: str) -> str:
         """Get system prompt for translation with RTL/LTR table handling."""
@@ -367,7 +366,19 @@ Provide only the translation without any explanations or notes."""
         output_multiplier = 1.2 if target_lang == "ar" else 1.0
         estimated_output_tokens = int(estimated_input_tokens * output_multiplier)
 
-        # Pricing per million tokens (approximate)
+        # Check if using Claude Code (subscription-based, no per-token cost)
+        if self._provider.name == "claude-code":
+            return {
+                "pages": len(pages),
+                "estimated_input_tokens": estimated_input_tokens,
+                "estimated_output_tokens": estimated_output_tokens,
+                "estimated_cost_usd": 0.0,  # Subscription-based, no per-token cost
+                "model": self._provider.model,
+                "provider": "claude-code",
+                "note": "Using Claude subscription - no per-token charges",
+            }
+
+        # Pricing per million tokens for OpenRouter (approximate)
         pricing = {
             "anthropic/claude-3.5-sonnet": {"input": 3.0, "output": 15.0},
             "anthropic/claude-3-haiku": {"input": 0.25, "output": 1.25},
@@ -377,7 +388,7 @@ Provide only the translation without any explanations or notes."""
         }
 
         model_pricing = pricing.get(
-            self._model,
+            self._provider.model,
             {"input": 3.0, "output": 15.0},  # Default to Claude pricing
         )
 
@@ -390,6 +401,7 @@ Provide only the translation without any explanations or notes."""
             "estimated_input_tokens": estimated_input_tokens,
             "estimated_output_tokens": estimated_output_tokens,
             "estimated_cost_usd": round(estimated_cost, 4),
-            "model": self._model,
+            "model": self._provider.model,
+            "provider": self._provider.name,
             "pricing": model_pricing,
         }

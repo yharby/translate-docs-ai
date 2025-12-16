@@ -35,6 +35,13 @@ class OCRModel(str, Enum):
     DEEPSEEK = "deepseek-ai/DeepSeek-OCR"
 
 
+class LLMProvider(str, Enum):
+    """Available LLM providers."""
+
+    OPENROUTER = "openrouter"
+    CLAUDE_CODE = "claude-code"
+
+
 class PathsConfig(BaseModel):
     """Configuration for file paths."""
 
@@ -101,6 +108,8 @@ Maintain academic writing style."""
 class TranslationConfig(BaseModel):
     """Configuration for translation."""
 
+    # LLM Provider selection: "openrouter" (pay-per-token) or "claude-code" (subscription)
+    provider: LLMProvider = Field(default=LLMProvider.OPENROUTER)
     default_model: str = Field(default="anthropic/claude-3.5-sonnet")
     target_language: str = Field(default="ar")
     source_language: str = Field(default="en")
@@ -108,6 +117,7 @@ class TranslationConfig(BaseModel):
     system_prompts: SystemPrompts = Field(default_factory=SystemPrompts)
     max_tokens_per_request: int = Field(default=4096, ge=256, le=32000)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    # OpenRouter API key (only required if provider is "openrouter")
     openrouter_api_key: str = Field(default="")
     min_term_frequency: int = Field(default=3, ge=1, le=100)
     max_terms: int = Field(default=500, ge=10, le=5000)
