@@ -3,6 +3,7 @@ DOCX exporter for translated documents.
 
 Uses python-docx for professional Word document generation.
 Handles RTL to LTR table column reversal for proper reading direction.
+Supports applying extracted styling from source PDF documents.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from docx import Document as DocxDocument
 from docx.enum.style import WD_STYLE_TYPE
@@ -21,6 +22,7 @@ from docx.oxml.ns import nsdecls
 from docx.shared import Inches, Pt, RGBColor
 
 from translate_docs_ai.export.table_utils import process_content_tables
+from translate_docs_ai.styling import FontManager, get_fallback_font
 
 if TYPE_CHECKING:
     from translate_docs_ai.database import Database, Document
@@ -78,6 +80,34 @@ class DOCXExporter:
         self.db = db
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._font_manager = FontManager()
+        self._doc_style: dict[str, Any] | None = None
+
+    def _load_document_styling(self, document_id: int) -> dict[str, Any] | None:
+        """Load extracted styling metadata for a document."""
+        return self.db.get_document_styling(document_id)
+
+    def _get_font_for_language(self, language: str, original_font: str | None = None) -> str:
+        """Get appropriate font for language with fallback support."""
+        # Try to use original font if available and supported
+        if original_font:
+            fallback = get_fallback_font(original_font, language)
+            return fallback
+        # Default fallback based on language
+        return get_fallback_font("Arial", language)
+
+    def _hex_to_rgb(self, hex_color: str | None) -> RGBColor | None:
+        """Convert hex color string to RGBColor."""
+        if not hex_color or not hex_color.startswith("#"):
+            return None
+        try:
+            hex_color = hex_color.lstrip("#")
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+            return RGBColor(r, g, b)
+        except (ValueError, IndexError):
+            return None
 
     def export_document(
         self,
@@ -139,13 +169,16 @@ class DOCXExporter:
         safe_name = self._sanitize_filename(doc_stem)
         output_file = self.output_dir / f"{safe_name}_{language}.docx"
 
+        # Load extracted styling from source document
+        self._doc_style = self._load_document_styling(document.id)
+
         try:
             # Create document
             docx = DocxDocument()
             is_rtl = language in self.RTL_LANGUAGES
 
-            # Setup styles
-            self._setup_styles(docx, is_rtl)
+            # Setup styles with extracted styling info
+            self._setup_styles(docx, is_rtl, language)
 
             if not clean:
                 # Add title page
@@ -187,15 +220,40 @@ class DOCXExporter:
                 error=str(e),
             )
 
-    def _setup_styles(self, docx: DocxDocument, is_rtl: bool) -> None:
-        """Setup custom styles for the document - optimized for page fit."""
+    def _setup_styles(self, docx: DocxDocument, is_rtl: bool, language: str = "en") -> None:
+        """Setup custom styles for the document using extracted styling when available."""
         styles = docx.styles
+
+        # Extract styling info from source document
+        body_font = None
+        body_size = 9.0
+        body_color = self.COLORS["text"]
+        heading_font = None
+        heading_size = 12.0
+
+        if self._doc_style:
+            # Use extracted dominant font and size
+            body_font = self._doc_style.get("dominant_font")
+            if self._doc_style.get("dominant_size"):
+                body_size = min(self._doc_style["dominant_size"], 12.0)  # Cap for readability
+            if self._doc_style.get("dominant_color"):
+                extracted_color = self._hex_to_rgb(self._doc_style["dominant_color"])
+                if extracted_color:
+                    body_color = extracted_color
+            heading_font = self._doc_style.get("heading_font") or body_font
+            # Heading size is typically larger than body
+            heading_size = body_size + 3 if body_size else 12.0
+
+        # Get appropriate fonts for the target language
+        body_font_name = self._get_font_for_language(language, body_font)
+        heading_font_name = self._get_font_for_language(language, heading_font)
 
         # Title style
         if "CustomTitle" not in [s.name for s in styles]:
             title_style = styles.add_style("CustomTitle", WD_STYLE_TYPE.PARAGRAPH)
             title_style.font.size = Pt(16)
             title_style.font.bold = True
+            title_style.font.name = heading_font_name
             title_style.font.color.rgb = self.COLORS["primary"]
             title_style.paragraph_format.space_after = Pt(6)
             title_style.paragraph_format.alignment = (
@@ -204,32 +262,36 @@ class DOCXExporter:
 
         # Heading 1 style - page headers
         h1_style = styles["Heading 1"]
-        h1_style.font.size = Pt(12)
+        h1_style.font.size = Pt(heading_size)
         h1_style.font.bold = True
+        h1_style.font.name = heading_font_name
         h1_style.font.color.rgb = self.COLORS["primary"]
         h1_style.paragraph_format.space_before = Pt(6)
         h1_style.paragraph_format.space_after = Pt(4)
 
         # Heading 2 style
         h2_style = styles["Heading 2"]
-        h2_style.font.size = Pt(11)
+        h2_style.font.size = Pt(heading_size - 1)
         h2_style.font.bold = True
+        h2_style.font.name = heading_font_name
         h2_style.font.color.rgb = self.COLORS["secondary"]
         h2_style.paragraph_format.space_before = Pt(4)
         h2_style.paragraph_format.space_after = Pt(2)
 
         # Heading 3 style
         h3_style = styles["Heading 3"]
-        h3_style.font.size = Pt(10)
+        h3_style.font.size = Pt(heading_size - 2)
         h3_style.font.bold = True
+        h3_style.font.name = heading_font_name
         h3_style.font.color.rgb = self.COLORS["text"]
         h3_style.paragraph_format.space_before = Pt(3)
         h3_style.paragraph_format.space_after = Pt(2)
 
-        # Normal text - smaller for page fit
+        # Normal text - use extracted styling
         normal_style = styles["Normal"]
-        normal_style.font.size = Pt(9)
-        normal_style.font.color.rgb = self.COLORS["text"]
+        normal_style.font.size = Pt(body_size)
+        normal_style.font.name = body_font_name
+        normal_style.font.color.rgb = body_color
         normal_style.paragraph_format.space_after = Pt(3)
         normal_style.paragraph_format.space_before = Pt(1)
         normal_style.paragraph_format.line_spacing = 1.15
@@ -237,17 +299,18 @@ class DOCXExporter:
         # List styles
         if "List Bullet" in [s.name for s in styles]:
             list_style = styles["List Bullet"]
-            list_style.font.size = Pt(9)
+            list_style.font.size = Pt(body_size)
+            list_style.font.name = body_font_name
             list_style.paragraph_format.space_after = Pt(2)
 
         if "List Number" in [s.name for s in styles]:
             list_num_style = styles["List Number"]
-            list_num_style.font.size = Pt(9)
+            list_num_style.font.size = Pt(body_size)
+            list_num_style.font.name = body_font_name
             list_num_style.paragraph_format.space_after = Pt(2)
 
         if is_rtl:
             normal_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            normal_style.font.name = "Traditional Arabic"
 
     def _add_title_page(
         self,

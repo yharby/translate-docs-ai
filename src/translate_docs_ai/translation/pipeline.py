@@ -9,6 +9,7 @@ Provides stateful workflow for document translation with:
 
 from __future__ import annotations
 
+import json
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from translate_docs_ai.config import LLMProvider, ProcessingMode
 from translate_docs_ai.database import Database, Page, Stage, Status
 from translate_docs_ai.memory import DuckDBStore
 from translate_docs_ai.ocr import DeepInfraOCR, PyMuPDFExtractor
+from translate_docs_ai.styling import StyleExtractor
 from translate_docs_ai.terminology import (
     GlossaryDetector,
     LLMTerminologyExtractor,
@@ -240,6 +242,9 @@ class TranslationPipeline:
                 db=self.db,
                 embedding_generator=self.embedding_generator,
             )
+
+        # Style extractor for preserving document formatting
+        self.style_extractor = StyleExtractor()
 
         # Translation - uses provider abstraction
         self.translator = PageTranslator(
@@ -461,6 +466,33 @@ class TranslationPipeline:
                 message=ocr_msg,
                 document_id=document_id,
             )
+
+            # Extract and store styling information from PDF
+            if doc_path.suffix.lower() == ".pdf":
+                try:
+                    self._report_progress(
+                        stage="ocr",
+                        stage_display="Extracting document styling",
+                    )
+                    doc_style = self.style_extractor.extract_from_pdf(doc_path)
+                    if doc_style and doc_style.page_styles:
+                        # Convert to JSON-serializable dict and store
+                        styling_data = json.loads(doc_style.to_json())
+                        self.db.set_document_styling(document_id, styling_data)
+                        self.db.log(
+                            level="INFO",
+                            stage="ocr",
+                            message=f"Extracted styling: {len(doc_style.page_styles)} pages, "
+                            f"dominant font: {doc_style.dominant_font}, RTL: {doc_style.is_rtl}",
+                            document_id=document_id,
+                        )
+                except Exception as e:
+                    self.db.log(
+                        level="WARNING",
+                        stage="ocr",
+                        message=f"Style extraction failed (non-fatal): {e}",
+                        document_id=document_id,
+                    )
 
             # Save checkpoint
             self.db.save_checkpoint(

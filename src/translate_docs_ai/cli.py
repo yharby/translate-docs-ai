@@ -1042,16 +1042,7 @@ def export(
         console.print(f"[red]Unsupported format: {fmt}. Use md, pdf, or docx[/red]")
         raise typer.Exit(1)
 
-    # Create appropriate exporter
-    if fmt == "pdf":
-        exporter = PDFExporter(db, out_dir)
-        format_name = "PDF"
-    elif fmt == "docx":
-        exporter = DOCXExporter(db, out_dir)
-        format_name = "DOCX"
-    else:
-        exporter = MarkdownExporter(db, out_dir)
-        format_name = "Markdown"
+    format_name = {"pdf": "PDF", "docx": "DOCX", "md": "Markdown"}[fmt]
 
     # Determine clean mode: CLI flag overrides config
     use_clean = clean if clean is not None else settings.export.clean
@@ -1060,6 +1051,12 @@ def export(
     if use_clean:
         console.print("[dim](clean mode: no metadata/page headers)[/dim]")
     console.print()
+
+    # Helper function to sanitize filename for directory name
+    def sanitize_dirname(name: str) -> str:
+        """Create safe directory name from document filename."""
+        stem = Path(name).stem
+        return "".join(c if c.isalnum() or c in "._- " else "_" for c in stem)
 
     # Export documents with progress
     with Progress(
@@ -1073,6 +1070,18 @@ def export(
         results = []
         for doc in documents:
             progress.update(task, description=f"Exporting {doc.file_name}")
+
+            # Create document-specific output directory
+            doc_dir = out_dir / sanitize_dirname(doc.file_name)
+            doc_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create exporter for this document's directory
+            if fmt == "pdf":
+                exporter = PDFExporter(db, doc_dir)
+            elif fmt == "docx":
+                exporter = DOCXExporter(db, doc_dir)
+            else:
+                exporter = MarkdownExporter(db, doc_dir)
 
             if fmt == "md":
                 result = exporter.export_document(
@@ -1089,9 +1098,9 @@ def export(
     for result in results:
         if result.success:
             exported_count += 1
-            console.print(
-                f"  [green]✓[/green] {result.output_path.name} ({result.pages_exported} pages)"
-            )
+            # Show path relative to out_dir
+            rel_path = result.output_path.relative_to(out_dir)
+            console.print(f"  [green]✓[/green] {rel_path} ({result.pages_exported} pages)")
         else:
             console.print(f"  [yellow]⚠[/yellow] {result.document_name}: {result.error}")
 

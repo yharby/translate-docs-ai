@@ -53,6 +53,7 @@ class Document:
     file_type: str = ""
     total_pages: int = 0
     status: Status = Status.PENDING
+    styling_metadata: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -141,6 +142,7 @@ class Database:
         file_type VARCHAR,
         total_pages INTEGER DEFAULT 0,
         status VARCHAR DEFAULT 'pending',
+        styling_metadata JSON,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -277,6 +279,23 @@ class Database:
     def _init_schema(self) -> None:
         """Initialize database schema."""
         self.conn.execute(self._SCHEMA)
+        # Migrate existing databases: add styling_metadata column if missing
+        self._migrate_add_styling_column()
+
+    def _migrate_add_styling_column(self) -> None:
+        """Add styling_metadata column to documents table if it doesn't exist."""
+        try:
+            # Check if column exists by querying table info
+            result = self.conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'documents' AND column_name = 'styling_metadata'"
+            ).fetchone()
+            if not result:
+                # Column doesn't exist, add it
+                self.conn.execute("ALTER TABLE documents ADD COLUMN styling_metadata JSON")
+        except Exception:
+            # If anything fails, the column either exists or table doesn't exist yet
+            pass
 
     def close(self) -> None:
         """Close database connection."""
@@ -357,19 +376,60 @@ class Database:
             [total_pages, doc_id],
         )
 
+    def set_document_styling(self, doc_id: int, styling_metadata: dict[str, Any]) -> None:
+        """Store extracted styling metadata for a document."""
+        styling_json = json.dumps(styling_metadata)
+        self.conn.execute(
+            "UPDATE documents SET styling_metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [styling_json, doc_id],
+        )
+
+    def get_document_styling(self, doc_id: int) -> dict[str, Any] | None:
+        """Get styling metadata for a document."""
+        row = self.conn.execute(
+            "SELECT styling_metadata FROM documents WHERE id = ?", [doc_id]
+        ).fetchone()
+        if row and row[0]:
+            styling_data = row[0]
+            if isinstance(styling_data, str):
+                return json.loads(styling_data)
+            return styling_data
+        return None
+
     def _row_to_document(self, row: tuple) -> Document:
         """Convert database row to Document."""
-        return Document(
-            id=row[0],
-            file_name=row[1],
-            full_path=row[2],
-            relative_path=row[3],
-            file_type=row[4],
-            total_pages=row[5],
-            status=Status(row[6]),
-            created_at=row[7],
-            updated_at=row[8],
-        )
+        # Handle both old schema (9 columns) and new schema (10 columns with styling_metadata)
+        if len(row) >= 10:
+            # New schema with styling_metadata at index 7
+            styling_data = row[7]
+            if isinstance(styling_data, str):
+                styling_data = json.loads(styling_data)
+            return Document(
+                id=row[0],
+                file_name=row[1],
+                full_path=row[2],
+                relative_path=row[3],
+                file_type=row[4],
+                total_pages=row[5],
+                status=Status(row[6]),
+                styling_metadata=styling_data,
+                created_at=row[8],
+                updated_at=row[9],
+            )
+        else:
+            # Old schema without styling_metadata
+            return Document(
+                id=row[0],
+                file_name=row[1],
+                full_path=row[2],
+                relative_path=row[3],
+                file_type=row[4],
+                total_pages=row[5],
+                status=Status(row[6]),
+                styling_metadata=None,
+                created_at=row[7],
+                updated_at=row[8],
+            )
 
     # ==================== Pages ====================
 
