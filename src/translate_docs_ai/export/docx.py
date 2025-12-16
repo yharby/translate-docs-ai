@@ -403,22 +403,21 @@ class DOCXExporter:
                 code_lines.append(line)
                 continue
 
+            # Skip table separator lines (must be checked before table row detection)
+            if re.match(r"^\|[\s\-:|]+\|$", line.strip()):
+                continue
+
             # Table handling
-            if "|" in line and not line.strip().startswith("|--"):
-                if line.strip().startswith("|"):
-                    cells = [c.strip() for c in line.split("|")[1:-1]]
-                    if cells:
-                        table_rows.append(cells)
-                        in_table = True
+            if "|" in line and line.strip().startswith("|"):
+                cells = [c.strip() for c in line.split("|")[1:-1]]
+                if cells:
+                    table_rows.append(cells)
+                    in_table = True
                 continue
             elif in_table and table_rows:
                 self._add_table(docx, table_rows, is_rtl)
                 table_rows = []
                 in_table = False
-
-            # Skip table separator lines
-            if re.match(r"^\|[\s\-:|]+\|$", line.strip()):
-                continue
 
             # Empty line
             if not line.strip():
