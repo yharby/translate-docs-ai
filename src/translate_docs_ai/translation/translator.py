@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from translate_docs_ai.database import Database, Page
-from translate_docs_ai.llm import LLMProviderType, create_llm_provider
+from translate_docs_ai.llm import LLMProviderType
 from translate_docs_ai.translation.context import (
     ContextBuilder,
     TranslationContext,
@@ -42,7 +42,7 @@ class PageTranslator:
 
     # Recommended models for OpenRouter
     OPENROUTER_MODELS = {
-        "default": "anthropic/claude-3.5-sonnet",
+        "default": "anthropic/claude-sonnet-4.5",
         "fast": "anthropic/claude-3-haiku",
         "quality": "anthropic/claude-3-opus",
         "deepseek": "deepseek/deepseek-chat",
@@ -63,6 +63,11 @@ class PageTranslator:
         provider: LLMProviderType | str = LLMProviderType.OPENROUTER,
         api_key: str | None = None,
         model: str = "default",
+        # Fallback provider settings (optional)
+        fallback_provider: LLMProviderType | str | None = None,
+        fallback_api_key: str | None = None,
+        fallback_model: str | None = None,
+        enable_fallback: bool = True,
         temperature: float = 0.3,
         max_tokens: int = 8192,
         timeout: float = 120.0,
@@ -76,6 +81,10 @@ class PageTranslator:
             provider: LLM provider type ("openrouter" or "claude-code").
             api_key: API key (required for openrouter, ignored for claude-code).
             model: Model key or full model name.
+            fallback_provider: Optional fallback provider type.
+            fallback_api_key: API key for fallback provider.
+            fallback_model: Model for fallback provider.
+            enable_fallback: Enable fallback if fallback_provider is set.
             temperature: Sampling temperature.
             max_tokens: Maximum output tokens.
             timeout: Request timeout in seconds.
@@ -96,14 +105,55 @@ class PageTranslator:
         else:
             resolved_model = self.OPENROUTER_MODELS.get(model, model)
 
-        # Create LLM provider
-        self._provider = create_llm_provider(
-            provider,
-            api_key=api_key,
-            model=resolved_model,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
+        # Check if fallback is configured and enabled
+        use_fallback = enable_fallback and fallback_provider is not None
+
+        if use_fallback:
+            # Create provider with fallback
+            from translate_docs_ai.llm import create_llm_provider_with_fallback
+
+            # Normalize fallback provider
+            if isinstance(fallback_provider, str):
+                fallback_provider = LLMProviderType(fallback_provider.lower().replace("_", "-"))
+
+            # Resolve fallback model
+            if fallback_provider == LLMProviderType.CLAUDE_CODE:
+                resolved_fallback_model = self.CLAUDE_CODE_MODELS.get(
+                    fallback_model or "default", fallback_model or "default"
+                )
+            else:
+                resolved_fallback_model = self.OPENROUTER_MODELS.get(
+                    fallback_model or "default", fallback_model or "default"
+                )
+
+            # Create log callback for fallback provider
+            def log_callback(level: str, message: str, context: dict) -> None:
+                self.db.log(
+                    level=level, stage="translation_fallback", message=message, context=context
+                )
+
+            self._provider = create_llm_provider_with_fallback(
+                primary_provider=provider,
+                fallback_provider=fallback_provider,
+                primary_api_key=api_key,
+                fallback_api_key=fallback_api_key,
+                primary_model=resolved_model,
+                fallback_model=resolved_fallback_model,
+                log_callback=log_callback,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        else:
+            # Create single provider without fallback
+            from translate_docs_ai.llm import create_llm_provider
+
+            self._provider = create_llm_provider(
+                provider,
+                api_key=api_key,
+                model=resolved_model,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
 
         self._context_builder = ContextBuilder(db)
 
@@ -180,8 +230,8 @@ class PageTranslator:
                 level="ERROR",
                 stage="translation",
                 message=f"Translation failed: {e}",
-                page_id=page.id,
-                context={"error": str(e), "provider": self._provider.name},
+                document_id=page.document_id,
+                context={"error": str(e), "provider": self._provider.name, "page_id": page.id},
             )
             raise
 
@@ -333,8 +383,8 @@ Provide only the translation without any explanations or notes."""
                     stage="translation",
                     message=f"Translated page {page.page_number + 1}",
                     document_id=document_id,
-                    page_id=page.id,
                     context={
+                        "page_id": page.id,
                         "tokens_in": result.source_tokens,
                         "tokens_out": result.target_tokens,
                         "latency_ms": result.latency_ms,

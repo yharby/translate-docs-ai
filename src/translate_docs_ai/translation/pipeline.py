@@ -105,6 +105,12 @@ class PipelineConfig:
     openrouter_api_key: str | None = None
     deepinfra_api_key: str | None = None
 
+    # Fallback provider (optional) - automatically used if primary fails
+    fallback_provider: LLMProvider | None = None
+    fallback_api_key: str | None = None
+    fallback_model: str | None = None
+    enable_fallback: bool = True
+
     # Processing options
     processing_mode: ProcessingMode = ProcessingMode.AUTO
     source_lang: str = "en"
@@ -246,12 +252,22 @@ class TranslationPipeline:
         # Style extractor for preserving document formatting
         self.style_extractor = StyleExtractor()
 
-        # Translation - uses provider abstraction
+        # Translation - uses provider abstraction with optional fallback
+        fallback_config = {}
+        if hasattr(self.config, "fallback_provider") and self.config.fallback_provider:
+            fallback_config = {
+                "fallback_provider": self.config.fallback_provider.value,
+                "fallback_api_key": self.config.fallback_api_key,
+                "fallback_model": self.config.fallback_model,
+                "enable_fallback": getattr(self.config, "enable_fallback", True),
+            }
+
         self.translator = PageTranslator(
             db=self.db,
             provider=self.config.llm_provider.value,
             api_key=self.config.openrouter_api_key,
             model=self.config.translation_model,
+            **fallback_config,
         )
 
     def _build_graph(self) -> StateGraph:

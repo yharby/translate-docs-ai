@@ -59,8 +59,15 @@ def _display_config(settings: Settings, config_path: Path | None) -> None:
         "  DeepInfra API", "configured" if settings.ocr.deepinfra_api_key else "[red]not set[/red]"
     )
     config_table.add_row("", "")
-    config_table.add_row("[bold]Translation Settings[/bold]", "")
+    config_table.add_row("Translation Settings", "", style="bold cyan")
     config_table.add_row("  Model", settings.translation.default_model)
+    # Show fallback if configured
+    if settings.translation.fallback_provider:
+        config_table.add_row(
+            "  Fallback",
+            f"{settings.translation.fallback_provider.value} ({settings.translation.fallback_model or 'default'})",
+            style="yellow",
+        )
     config_table.add_row("  Source language", settings.translation.source_language)
     config_table.add_row("  Target language", settings.translation.target_language)
     config_table.add_row(
@@ -531,6 +538,11 @@ def translate(
         llm_provider=llm_provider,
         openrouter_api_key=settings.translation.openrouter_api_key,
         deepinfra_api_key=settings.ocr.deepinfra_api_key,
+        # Fallback provider configuration
+        fallback_provider=settings.translation.fallback_provider,
+        fallback_api_key=settings.translation.openrouter_api_key,
+        fallback_model=settings.translation.fallback_model,
+        enable_fallback=settings.translation.enable_fallback,
         processing_mode=processing_mode,
         source_lang=source_lang,
         target_lang=target_lang,
@@ -793,6 +805,11 @@ def approve(
         llm_provider=settings.translation.provider,
         openrouter_api_key=settings.translation.openrouter_api_key,
         deepinfra_api_key=settings.ocr.deepinfra_api_key,
+        # Fallback provider configuration
+        fallback_provider=settings.translation.fallback_provider,
+        fallback_api_key=settings.translation.openrouter_api_key,
+        fallback_model=settings.translation.fallback_model,
+        enable_fallback=settings.translation.enable_fallback,
         source_lang=settings.translation.source_language,
         target_lang=settings.translation.target_language,
         translation_model=settings.translation.default_model,
@@ -1190,6 +1207,11 @@ def run(
         llm_provider=llm_provider,
         openrouter_api_key=settings.translation.openrouter_api_key,
         deepinfra_api_key=settings.ocr.deepinfra_api_key,
+        # Fallback provider configuration
+        fallback_provider=settings.translation.fallback_provider,
+        fallback_api_key=settings.translation.openrouter_api_key,  # Use same OpenRouter key for fallback
+        fallback_model=settings.translation.fallback_model,
+        enable_fallback=settings.translation.enable_fallback,
         processing_mode=settings.processing.mode,
         source_lang=settings.translation.source_language,
         target_lang=settings.translation.target_language,

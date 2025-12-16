@@ -7,11 +7,16 @@ Supports multiple LLM backends:
 """
 
 from translate_docs_ai.llm.base import LLMProvider, LLMResponse
-from translate_docs_ai.llm.factory import LLMProviderType, create_llm_provider
+from translate_docs_ai.llm.factory import (
+    LLMProviderType,
+    create_llm_provider,
+    create_llm_provider_with_fallback,
+)
 
 __all__ = [
     "LLMProvider",
     "LLMResponse",
     "LLMProviderType",
     "create_llm_provider",
+    "create_llm_provider_with_fallback",
 ]

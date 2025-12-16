@@ -45,7 +45,7 @@ class LLMTerminologyExtractor:
 
     # Model aliases for different providers
     OPENROUTER_MODELS = {
-        "default": "anthropic/claude-3.5-sonnet",
+        "default": "anthropic/claude-sonnet-4.5",
         "fast": "anthropic/claude-3-haiku",
         "quality": "anthropic/claude-3-opus",
     }

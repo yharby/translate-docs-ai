@@ -110,7 +110,13 @@ class TranslationConfig(BaseModel):
 
     # LLM Provider selection: "openrouter" (pay-per-token) or "claude-code" (subscription)
     provider: LLMProvider = Field(default=LLMProvider.OPENROUTER)
-    default_model: str = Field(default="anthropic/claude-3.5-sonnet")
+    default_model: str = Field(default="anthropic/claude-sonnet-4.5")
+
+    # Fallback provider (optional) - automatically used if primary fails
+    fallback_provider: LLMProvider | None = Field(default=None)
+    fallback_model: str | None = Field(default=None)
+    enable_fallback: bool = Field(default=True)  # Enable fallback if fallback_provider is set
+
     target_language: str = Field(default="ar")
     source_language: str = Field(default="en")
     context: ContextConfig = Field(default_factory=ContextConfig)

@@ -26,7 +26,7 @@ class OpenRouterProvider(LLMProvider):
 
     # Model aliases for convenience
     MODELS = {
-        "default": "anthropic/claude-3.5-sonnet",
+        "default": "anthropic/claude-sonnet-4.5",
         "fast": "anthropic/claude-3-haiku",
         "quality": "anthropic/claude-3-opus",
         "deepseek": "deepseek/deepseek-chat",

@@ -7,7 +7,7 @@ Creates the appropriate LLM provider based on configuration.
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from translate_docs_ai.llm.base import LLMProvider
 
@@ -107,7 +107,70 @@ def get_default_model_for_provider(provider_type: LLMProviderType | str) -> str:
         provider_type = LLMProviderType(provider_type.lower().replace("_", "-"))
 
     defaults = {
-        LLMProviderType.OPENROUTER: "anthropic/claude-3.5-sonnet",
+        LLMProviderType.OPENROUTER: "anthropic/claude-sonnet-4.5",
         LLMProviderType.CLAUDE_CODE: "sonnet",
     }
     return defaults.get(provider_type, "default")
+
+
+def create_llm_provider_with_fallback(
+    primary_provider: LLMProviderType | str,
+    fallback_provider: LLMProviderType | str,
+    *,
+    primary_api_key: str | None = None,
+    fallback_api_key: str | None = None,
+    primary_model: str = "default",
+    fallback_model: str = "default",
+    log_callback: Any = None,
+    **kwargs,
+) -> LLMProvider:
+    """
+    Create an LLM provider with automatic fallback support.
+
+    Args:
+        primary_provider: Primary provider type to try first.
+        fallback_provider: Fallback provider to use if primary fails.
+        primary_api_key: API key for primary provider (if needed).
+        fallback_api_key: API key for fallback provider (if needed).
+        primary_model: Model for primary provider.
+        fallback_model: Model for fallback provider.
+        log_callback: Optional callback for logging provider switches.
+        **kwargs: Additional options passed to both providers.
+
+    Returns:
+        FallbackLLMProvider wrapping both providers.
+
+    Example:
+        # Claude Code primary with OpenRouter fallback
+        provider = create_llm_provider_with_fallback(
+            primary_provider="claude-code",
+            fallback_provider="openrouter",
+            fallback_api_key="sk-or-...",
+            primary_model="sonnet",
+            fallback_model="anthropic/claude-sonnet-4.5"
+        )
+    """
+    from translate_docs_ai.llm.fallback import FallbackLLMProvider
+
+    # Create primary provider
+    primary = create_llm_provider(
+        primary_provider,
+        api_key=primary_api_key,
+        model=primary_model,
+        **kwargs,
+    )
+
+    # Create fallback provider
+    fallback = create_llm_provider(
+        fallback_provider,
+        api_key=fallback_api_key,
+        model=fallback_model,
+        **kwargs,
+    )
+
+    # Wrap in fallback provider
+    return FallbackLLMProvider(
+        primary=primary,
+        fallback=fallback,
+        log_callback=log_callback,
+    )
