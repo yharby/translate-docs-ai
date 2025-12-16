@@ -1104,6 +1104,8 @@ def export(
                 result = exporter.export_document(
                     doc, language=language, combined=combined, clean=use_clean
                 )
+            elif fmt == "docx":
+                result = exporter.export_document(doc, language=language)
             else:
                 result = exporter.export_document(doc, language=language, clean=use_clean)
 

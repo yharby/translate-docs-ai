@@ -236,8 +236,9 @@ th, td {{
 }}
 
 th {{
-    background-color: #d0d0d0;
+    background-color: transparent;
     font-weight: bold;
+    border-bottom: 2px solid #666;
 }}
 
 code {{

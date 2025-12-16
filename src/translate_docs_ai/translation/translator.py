@@ -286,10 +286,33 @@ class PageTranslator:
      |----------|----------|----------|
      | Cell 1   | Cell 2   | Cell 3   |"""
 
+        # Markdown structure detection and creation instructions
+        markdown_structure_instruction = """
+9. **MARKDOWN STRUCTURE**: The source text may lack markdown formatting. You MUST identify and apply proper markdown structure:
+
+   **Headings**: Identify titles, section headers, chapter names, and article numbers. Apply appropriate heading levels:
+   - Document/chapter titles: `# Title` (H1)
+   - Major sections (e.g., "Chapter One", "Part 1"): `## Section` (H2)
+   - Sub-sections (e.g., "Article (1)", "Section 1.1"): `### Subsection` (H3)
+   - Minor headings: `####` through `######` (H4-H6)
+   - Common patterns to detect: "Chapter", "Article", "Section", "Part", numbered headings like "1.", "1.1", "١.", "المادة"
+
+   **Lists**: Identify enumerated or bulleted content and format as markdown lists:
+   - Numbered items (1., 2., 3., أ., ب., etc.): Use `1. `, `2. `, etc.
+   - Lettered items (a., b., c., أ), ب), etc.): Use `a. `, `b. `, etc. or sub-lists
+   - Bullet points (•, -, *, ●, ○): Use `- ` for unordered lists
+   - Nested lists: Indent with 2-4 spaces
+
+   **Paragraphs**: Separate distinct paragraphs with blank lines.
+
+   **Bold/Emphasis**: Use `**bold**` for emphasized terms, definitions, or important concepts.
+
+   **Tables**: If content appears tabular (aligned columns, repeated structure), format as markdown tables."""
+
         return f"""You are an expert translator specializing in technical documentation.
 Your task is to translate text from {source_name} to {target_name} while:
 
-1. Preserving all markdown formatting exactly (headers, lists, code blocks, links)
+1. Preserving existing markdown formatting (headers, lists, code blocks, links)
 2. Using terminology from the provided glossary consistently
 3. Maintaining the technical accuracy and meaning of the original
 4. Ensuring the translation flows naturally in {target_name}
@@ -297,6 +320,9 @@ Your task is to translate text from {source_name} to {target_name} while:
 6. Translating UI element names and button text appropriately
 {table_instructions}
 {html_table_instruction}
+{markdown_structure_instruction}
+
+IMPORTANT: Output well-structured markdown. Even if the source lacks formatting, identify structural elements and apply appropriate markdown syntax.
 
 Provide only the translation without any explanations or notes."""
 
