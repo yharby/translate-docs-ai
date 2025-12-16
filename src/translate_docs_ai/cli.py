@@ -1232,13 +1232,32 @@ def run(
 
     # Helper function to check if document is already exported
     def is_exported(doc, base_output_dir: Path) -> bool:
-        """Check if document has already been exported."""
+        """Check if document has all enabled export formats."""
         doc_dir = base_output_dir / sanitize_dirname(doc.file_name)
         if not doc_dir.exists():
             return False
-        # Check if any export files exist
-        export_files = list(doc_dir.glob("*.*"))
-        return len(export_files) > 0
+
+        # Get expected export language suffix
+        export_lang = settings.translation.target_language
+        safe_name = sanitize_dirname(doc.file_name)
+
+        # Check each enabled format
+        if settings.export.markdown:
+            md_file = doc_dir / f"{safe_name}_{export_lang}.md"
+            if not md_file.exists():
+                return False
+
+        if settings.export.pdf:
+            pdf_file = doc_dir / f"{safe_name}_{export_lang}.pdf"
+            if not pdf_file.exists():
+                return False
+
+        if settings.export.docx:
+            docx_file = doc_dir / f"{safe_name}_{export_lang}.docx"
+            if not docx_file.exists():
+                return False
+
+        return True
 
     # Helper function to export a single document to its own directory
     def export_document_to_dir(doc, base_output_dir: Path) -> None:
