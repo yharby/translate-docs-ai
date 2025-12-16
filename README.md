@@ -55,11 +55,13 @@ pip install -e .
 ## Configuration
 
 1. Copy the example config:
+
 ```bash
 cp config.example.yaml config.yaml
 ```
 
 2. Set your API keys in `.env` or environment:
+
 ```bash
 export DEEPINFRA_API_KEY="your-deepinfra-key"
 # Only needed if using OpenRouter provider:
@@ -67,24 +69,25 @@ export OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
 3. Edit `config.yaml` to customize:
+
 ```yaml
 # Key settings
 paths:
-  input_dir: ./documents      # Directory with PDFs to translate
-  output_dir: ./translated    # Output directory
+  input_dir: ./documents # Directory with PDFs to translate
+  output_dir: ./translated # Output directory
 
 translation:
   # LLM Provider: "claude-code" (subscription) or "openrouter" (pay-per-token)
-  provider: claude-code       # Use your Claude Pro/Max subscription!
+  provider: claude-code # Use your Claude Pro/Max subscription!
   # Models for claude-code: sonnet, opus, haiku
   # Models for openrouter: anthropic/claude-3.5-sonnet, deepseek/deepseek-chat, etc.
   default_model: sonnet
-  source_language: ar         # Source language (ar, en, fr)
-  target_language: en         # Target language
+  source_language: ar # Source language (ar, en, fr)
+  target_language: en # Target language
 
 ocr:
-  force_ocr: true            # Use OCR even for native PDFs
-  image_dpi: 300             # Higher = better quality, slower
+  force_ocr: true # Use OCR even for native PDFs
+  image_dpi: 300 # Higher = better quality, slower
 
 export:
   markdown: true
@@ -125,10 +128,11 @@ uv run translate-docs export --format docx --language en
 Semi-auto mode pauses after terminology extraction, exports terms to CSV for review, and waits for approval before continuing translation.
 
 **Option 1: Via config.yaml** (recommended for repeated use)
+
 ```yaml
 # config.yaml
 processing:
-  mode: semi-auto  # Enable semi-auto mode
+  mode: semi-auto # Enable semi-auto mode
 ```
 
 ```bash
@@ -137,11 +141,13 @@ uv run translate-docs run config.yaml
 ```
 
 **Option 2: Via CLI flag** (one-time override)
+
 ```bash
 uv run translate-docs translate --all --mode semi-auto --source ar --target en
 ```
 
 **Workflow:**
+
 ```bash
 # 1. Run translation (pauses after terminology extraction)
 uv run translate-docs translate --all -c config.yaml
@@ -168,17 +174,17 @@ uv run translate-docs approve --doc 1 --import ./translated/review/terms_*.csv
 
 ## CLI Commands
 
-| Command | Description |
-|---------|-------------|
-| `run <config.yaml>` | Run full pipeline with config file |
-| `scan <directory>` | Scan and catalog documents |
-| `status` | Show processing status |
-| `translate` | Translate documents (supports `--mode semi-auto`) |
-| `terms --doc N --export` | Export terminology to CSV for review |
-| `approve --doc N --import <csv>` | Import reviewed terms and continue |
-| `export` | Export translations to MD/PDF/DOCX |
-| `logs` | View processing logs |
-| `init` | Generate default config.yaml |
+| Command                          | Description                                       |
+| -------------------------------- | ------------------------------------------------- |
+| `run <config.yaml>`              | Run full pipeline with config file                |
+| `scan <directory>`               | Scan and catalog documents                        |
+| `status`                         | Show processing status                            |
+| `translate`                      | Translate documents (supports `--mode semi-auto`) |
+| `terms --doc N --export`         | Export terminology to CSV for review              |
+| `approve --doc N --import <csv>` | Import reviewed terms and continue                |
+| `export`                         | Export translations to MD/PDF/DOCX                |
+| `logs`                           | View processing logs                              |
+| `init`                           | Generate default config.yaml                      |
 
 ## Architecture
 
@@ -226,19 +232,22 @@ Use your existing Claude Pro/Max subscription with **no per-token charges**:
 # config.yaml
 translation:
   provider: claude-code
-  default_model: sonnet  # or opus, haiku
+  default_model: sonnet # or opus, haiku
 ```
 
 Or via CLI flag:
+
 ```bash
 uv run translate-docs translate --all --provider claude-code
 ```
 
 **Requirements:**
+
 - Claude Code CLI installed and authenticated (`claude login`)
 - Active Claude Pro ($20/mo) or Max ($100/mo) subscription
 
 **Benefits:**
+
 - No per-token API costs
 - Full 1M context window
 - Uses your existing subscription
@@ -256,22 +265,57 @@ translation:
 ```
 
 **Available Models:**
-- `anthropic/claude-3.5-sonnet` (default)
+
+- `anthropic/claude-sonnet-4.5` (default, latest)
 - `anthropic/claude-3-opus` (highest quality)
 - `anthropic/claude-3-haiku` (fastest)
 - `deepseek/deepseek-chat` (cost-effective)
 - `google/gemini-pro-1.5`
+
+### Automatic Fallback (Recommended)
+
+Configure a fallback provider to automatically handle rate limits or service outages:
+
+```yaml
+# config.yaml
+translation:
+  # Primary provider (e.g., Claude Code - free with subscription)
+  provider: claude-code
+  default_model: sonnet
+
+  # Fallback provider (e.g., OpenRouter - pay-per-token)
+  fallback_provider: openrouter
+  fallback_model: anthropic/claude-sonnet-4.5
+  enable_fallback: true
+
+  openrouter_api_key: ${OPENROUTER_API_KEY}
+```
+
+**How it works:**
+
+- Primary provider (Claude Code) handles all requests normally
+- If primary fails (rate limit, error, outage), automatically switches to fallback (OpenRouter)
+- Logs show when fallback is used: `⚠️ Primary provider failed, switching to fallback`
+- Translation continues without interruption
+
+**Benefits:**
+
+- **Resilience**: Automatic recovery from errors
+- **Cost optimization**: Use free Claude Code, fall back to paid OpenRouter only when needed
+- **Transparency**: All provider switches are logged
 
 ## Smart Terminology Extraction
 
 The terminology extraction uses a **hybrid token-efficient approach**:
 
 1. **Frequency-based extraction** (no API cost)
+
    - Identifies candidate terms using n-gram frequency analysis
    - Filters common words with stop word lists
    - Stores context snippets where each term appears
 
 2. **LLM-powered context-aware translation** (minimal tokens)
+
    - Only sends the term list with context to the LLM (not full document)
    - Uses sentence context to determine correct translation
    - Example: "bank" with context "river bank" translates correctly
@@ -281,10 +325,11 @@ The terminology extraction uses a **hybrid token-efficient approach**:
    - Enables semantic similarity search for term lookup
 
 **Configuration:**
+
 ```yaml
 terminology:
-  min_frequency: 3              # Minimum occurrences to extract
-  use_llm_translation: true     # Enable LLM-powered translation
+  min_frequency: 3 # Minimum occurrences to extract
+  use_llm_translation: true # Enable LLM-powered translation
   embedding_model: sentence-transformers/all-MiniLM-L6-v2
 ```
 
@@ -345,11 +390,11 @@ translate-docs-ai/
 
 ## API Keys & Requirements
 
-| Service | Purpose | Required? | Get Key |
-|---------|---------|-----------|---------|
-| DeepInfra | OCR (olmOCR-2) | Yes (for OCR) | [deepinfra.com](https://deepinfra.com) |
+| Service     | Purpose          | Required?                        | Get Key                                                 |
+| ----------- | ---------------- | -------------------------------- | ------------------------------------------------------- |
+| DeepInfra   | OCR (olmOCR-2)   | Yes (for OCR)                    | [deepinfra.com](https://deepinfra.com)                  |
 | Claude Code | Translation LLMs | If using `provider: claude-code` | [claude.ai/code](https://claude.ai/code) + subscription |
-| OpenRouter | Translation LLMs | If using `provider: openrouter` | [openrouter.ai](https://openrouter.ai) |
+| OpenRouter  | Translation LLMs | If using `provider: openrouter`  | [openrouter.ai](https://openrouter.ai)                  |
 
 **Note:** If you have a Claude Pro/Max subscription, use `provider: claude-code` - no OpenRouter API key needed!
 
