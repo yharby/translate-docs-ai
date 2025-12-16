@@ -8,7 +8,11 @@ translation, and export.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
+
+# Suppress HuggingFace tokenizers parallelism warning when forking processes
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import typer
 from rich.console import Console
@@ -1002,6 +1006,9 @@ def export(
     combined: bool = typer.Option(
         True, "--combined/--separate", help="For markdown: single file or separate per page"
     ),
+    clean: bool | None = typer.Option(
+        None, "--clean/--no-clean", help="Clean export without metadata/page headers/footers"
+    ),
 ) -> None:
     """Export translated documents to markdown, PDF, or DOCX files."""
     from translate_docs_ai.export import DOCXExporter, MarkdownExporter, PDFExporter
@@ -1046,7 +1053,13 @@ def export(
         exporter = MarkdownExporter(db, out_dir)
         format_name = "Markdown"
 
-    console.print(f"[cyan]Exporting to {format_name}...[/cyan]\n")
+    # Determine clean mode: CLI flag overrides config
+    use_clean = clean if clean is not None else settings.export.clean
+
+    console.print(f"[cyan]Exporting to {format_name}...[/cyan]")
+    if use_clean:
+        console.print("[dim](clean mode: no metadata/page headers)[/dim]")
+    console.print()
 
     # Export documents with progress
     with Progress(
@@ -1062,9 +1075,11 @@ def export(
             progress.update(task, description=f"Exporting {doc.file_name}")
 
             if fmt == "md":
-                result = exporter.export_document(doc, language=language, combined=combined)
+                result = exporter.export_document(
+                    doc, language=language, combined=combined, clean=use_clean
+                )
             else:
-                result = exporter.export_document(doc, language=language)
+                result = exporter.export_document(doc, language=language, clean=use_clean)
 
             results.append(result)
             progress.advance(task)
@@ -1197,6 +1212,7 @@ def run(
         """Export document to a directory named after the source file."""
         export_lang = settings.translation.target_language
         source_lang = settings.translation.source_language
+        use_clean = settings.export.clean
 
         # Create document-specific output directory
         doc_dir = base_output_dir / sanitize_dirname(doc.file_name)
@@ -1212,6 +1228,7 @@ def run(
                 language=export_lang,
                 combined=settings.export.markdown_combined,
                 source_lang=source_lang,
+                clean=use_clean,
             )
             if result.success:
                 exported_formats.append("MD")
@@ -1220,7 +1237,9 @@ def run(
 
         if settings.export.pdf:
             exporter = PDFExporter(db, doc_dir)
-            result = exporter.export_document(doc, language=export_lang, source_lang=source_lang)
+            result = exporter.export_document(
+                doc, language=export_lang, source_lang=source_lang, clean=use_clean
+            )
             if result.success:
                 exported_formats.append("PDF")
             elif result.error:
@@ -1228,7 +1247,9 @@ def run(
 
         if settings.export.docx:
             exporter = DOCXExporter(db, doc_dir)
-            result = exporter.export_document(doc, language=export_lang, source_lang=source_lang)
+            result = exporter.export_document(
+                doc, language=export_lang, source_lang=source_lang, clean=use_clean
+            )
             if result.success:
                 exported_formats.append("DOCX")
             elif result.error:

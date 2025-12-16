@@ -103,6 +103,10 @@ export:
   # Languages to export (empty = use target_language from translation)
   languages: []
 
+  # Clean export: no metadata headers, page numbers, footers, or separators
+  # Set to true to get output matching the source document's formatting
+  clean: false
+
 # Logging settings
 logging:
   level: INFO

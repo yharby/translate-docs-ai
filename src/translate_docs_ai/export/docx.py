@@ -84,6 +84,7 @@ class DOCXExporter:
         document: Document,
         language: str = "en",
         source_lang: str | None = None,
+        clean: bool = False,
     ) -> DOCXExportResult:
         """
         Export a single document to DOCX.
@@ -92,6 +93,7 @@ class DOCXExporter:
             document: Document to export.
             language: Target language code (en, ar, fr).
             source_lang: Source language code for RTL/LTR table conversion.
+            clean: If True, export without title page, page headers, or footer.
 
         Returns:
             DOCXExportResult with export status.
@@ -145,16 +147,22 @@ class DOCXExporter:
             # Setup styles
             self._setup_styles(docx, is_rtl)
 
-            # Add title page
-            self._add_title_page(docx, document.file_name, language, len(translated_pages), is_rtl)
+            if not clean:
+                # Add title page
+                self._add_title_page(
+                    docx, document.file_name, language, len(translated_pages), is_rtl
+                )
 
             # Add content with page breaks between each page
             for idx, (page_num, content) in enumerate(translated_pages):
                 is_last = idx == len(translated_pages) - 1
-                self._add_page_content(docx, page_num, content, is_rtl, is_last_page=is_last)
+                self._add_page_content(
+                    docx, page_num, content, is_rtl, is_last_page=is_last, clean=clean
+                )
 
-            # Add footer with page numbers
-            self._add_footer(docx)
+            if not clean:
+                # Add footer with page numbers
+                self._add_footer(docx)
 
             # Save
             docx.save(str(output_file))
@@ -286,13 +294,15 @@ class DOCXExporter:
         content: str,
         is_rtl: bool,
         is_last_page: bool = False,
+        clean: bool = False,
     ) -> None:
         """Add page content with markdown parsing."""
-        # Page header with page number in footer style
-        page_label = f"صفحة {page_num + 1}" if is_rtl else f"Page {page_num + 1}"
-        heading = docx.add_heading(page_label, level=1)
-        if is_rtl:
-            heading.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        if not clean:
+            # Page header with page number in footer style
+            page_label = f"صفحة {page_num + 1}" if is_rtl else f"Page {page_num + 1}"
+            heading = docx.add_heading(page_label, level=1)
+            if is_rtl:
+                heading.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
         # Parse and add content
         self._parse_markdown_to_docx(docx, content, is_rtl)
@@ -528,10 +538,11 @@ class DOCXExporter:
         documents: list[Document],
         language: str = "en",
         source_lang: str | None = None,
+        clean: bool = False,
     ) -> list[DOCXExportResult]:
         """Export multiple documents to DOCX."""
         results = []
         for doc in documents:
-            result = self.export_document(doc, language, source_lang)
+            result = self.export_document(doc, language, source_lang, clean)
             results.append(result)
         return results

@@ -64,6 +64,7 @@ class MarkdownExporter:
         language: str = "en",
         combined: bool = True,
         source_lang: str | None = None,
+        clean: bool = False,
     ) -> ExportResult:
         """
         Export a single document to markdown.
@@ -73,6 +74,7 @@ class MarkdownExporter:
             language: Target language code (en, ar, fr).
             combined: If True, export as single file; if False, separate files per page.
             source_lang: Source language code for RTL/LTR table conversion.
+            clean: If True, export without metadata headers, page numbers, or separators.
 
         Returns:
             ExportResult with export status and details.
@@ -122,7 +124,9 @@ class MarkdownExporter:
         safe_name = self._sanitize_filename(doc_stem)
 
         if combined:
-            output_path = self._export_combined(document, safe_name, translated_pages, language)
+            output_path = self._export_combined(
+                document, safe_name, translated_pages, language, clean
+            )
         else:
             output_path = self._export_separate(safe_name, translated_pages, language)
 
@@ -141,29 +145,33 @@ class MarkdownExporter:
         safe_name: str,
         pages: list[tuple[int, str]],
         language: str,
+        clean: bool = False,
     ) -> Path:
         """Export document as a single combined markdown file."""
         output_file = self.output_dir / f"{safe_name}_{language}.md"
 
         content_parts = []
 
-        # Add header
-        content_parts.append(f"# {document.file_name}")
-        content_parts.append("")
-        content_parts.append(f"**Source:** {document.file_name}")
-        content_parts.append(f"**Language:** {language.upper()}")
-        content_parts.append(f"**Total Pages:** {len(pages)}")
-        content_parts.append("")
-        content_parts.append("---")
-        content_parts.append("")
+        if not clean:
+            # Add header with metadata
+            content_parts.append(f"# {document.file_name}")
+            content_parts.append("")
+            content_parts.append(f"**Source:** {document.file_name}")
+            content_parts.append(f"**Language:** {language.upper()}")
+            content_parts.append(f"**Total Pages:** {len(pages)}")
+            content_parts.append("")
+            content_parts.append("---")
+            content_parts.append("")
 
         # Add pages
         for page_num, content in pages:
-            content_parts.append(f"## Page {page_num + 1}")
-            content_parts.append("")
+            if not clean:
+                content_parts.append(f"## Page {page_num + 1}")
+                content_parts.append("")
             content_parts.append(content)
-            content_parts.append("")
-            content_parts.append("---")
+            if not clean:
+                content_parts.append("")
+                content_parts.append("---")
             content_parts.append("")
 
         output_file.write_text("\n".join(content_parts), encoding="utf-8")
@@ -195,6 +203,7 @@ class MarkdownExporter:
         language: str = "en",
         combined: bool = True,
         source_lang: str | None = None,
+        clean: bool = False,
     ) -> list[ExportResult]:
         """
         Export multiple documents.
@@ -204,12 +213,13 @@ class MarkdownExporter:
             language: Target language code (en, ar, fr).
             combined: If True, export as single file; if False, separate files per page.
             source_lang: Source language code for RTL/LTR table conversion.
+            clean: If True, export without metadata headers, page numbers, or separators.
 
         Returns:
             List of ExportResults for each document.
         """
         results = []
         for doc in documents:
-            result = self.export_document(doc, language, combined, source_lang)
+            result = self.export_document(doc, language, combined, source_lang, clean)
             results.append(result)
         return results

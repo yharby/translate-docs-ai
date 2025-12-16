@@ -253,6 +253,7 @@ class PDFExporter:
         language: str = "en",
         include_toc: bool = True,
         source_lang: str | None = None,
+        clean: bool = False,
     ) -> PDFExportResult:
         """
         Export a single document to PDF.
@@ -262,6 +263,7 @@ class PDFExporter:
             language: Target language code (en, ar, fr).
             include_toc: Include table of contents.
             source_lang: Source language code for RTL/LTR table conversion.
+            clean: If True, export without title page, page headers, or metadata.
 
         Returns:
             PDFExportResult with export status.
@@ -316,11 +318,13 @@ class PDFExporter:
 
         try:
             # Create PDF with separate sections for each page (creates page breaks)
-            # Use toc_level=1 to include h1 headings in TOC
-            pdf = MarkdownPdf(toc_level=1 if include_toc else 0)
+            # Use toc_level=1 to include h1 headings in TOC (disabled for clean mode)
+            use_toc = include_toc and not clean
+            pdf = MarkdownPdf(toc_level=1 if use_toc else 0)
 
-            # Title page section
-            title_content = f"""# {document.file_name}
+            if not clean:
+                # Title page section
+                title_content = f"""# {document.file_name}
 
 **Language:** {language.upper()}
 
@@ -328,16 +332,21 @@ class PDFExporter:
 
 ---
 """
-            pdf.add_section(Section(title_content, toc=False))
+                pdf.add_section(Section(title_content, toc=False))
 
             # Each translated page as a separate section (creates page breaks)
             for page_num, content in translated_pages:
-                # Use h1 for page headers so they appear in TOC
-                page_content = f"# Page {page_num + 1}\n\n{content}"
-                pdf.add_section(Section(page_content, toc=include_toc))
+                if clean:
+                    # Clean mode: just the content, no page headers
+                    pdf.add_section(Section(content, toc=False))
+                else:
+                    # Use h1 for page headers so they appear in TOC
+                    page_content = f"# Page {page_num + 1}\n\n{content}"
+                    pdf.add_section(Section(page_content, toc=use_toc))
 
-            pdf.meta["title"] = document.file_name
-            pdf.meta["author"] = "translate-docs-ai"
+            if not clean:
+                pdf.meta["title"] = document.file_name
+                pdf.meta["author"] = "translate-docs-ai"
             pdf.save(str(output_file))
 
             return PDFExportResult(
@@ -370,10 +379,11 @@ class PDFExporter:
         language: str = "en",
         include_toc: bool = True,
         source_lang: str | None = None,
+        clean: bool = False,
     ) -> list[PDFExportResult]:
         """Export multiple documents to PDF."""
         results = []
         for doc in documents:
-            result = self.export_document(doc, language, include_toc, source_lang)
+            result = self.export_document(doc, language, include_toc, source_lang, clean)
             results.append(result)
         return results

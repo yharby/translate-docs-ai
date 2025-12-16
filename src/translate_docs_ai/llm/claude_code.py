@@ -46,6 +46,7 @@ class ClaudeCodeProvider(LLMProvider):
         model: str = "default",
         max_turns: int = 1,
         timeout: float = 120.0,
+        max_retries: int = 3,  # Accepted for API compatibility
     ):
         """
         Initialize Claude Code provider.
@@ -54,10 +55,12 @@ class ClaudeCodeProvider(LLMProvider):
             model: Model key (sonnet, opus, haiku) or alias (default, fast, quality).
             max_turns: Maximum conversation turns (1 for simple completions).
             timeout: Request timeout in seconds.
+            max_retries: Maximum retry attempts (accepted for API compatibility).
         """
         self._model_name = self.MODELS.get(model, model)
         self._max_turns = max_turns
         self._timeout = timeout
+        self._max_retries = max_retries
 
         # Lazy import to avoid import errors if SDK not installed
         self._sdk_available: bool | None = None

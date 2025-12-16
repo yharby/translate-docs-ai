@@ -192,6 +192,10 @@ class ExportConfig(BaseModel):
     # Languages to export (if empty, exports target_language)
     languages: list[str] = Field(default_factory=list)
 
+    # Clean export: no metadata headers, page numbers, footers, or separators
+    # Produces output matching the source document's formatting
+    clean: bool = Field(default=False)
+
 
 class ProjectConfig(BaseModel):
     """Project metadata configuration."""
