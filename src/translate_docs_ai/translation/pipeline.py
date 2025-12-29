@@ -22,7 +22,7 @@ from langgraph.graph import END, StateGraph
 from translate_docs_ai.config import LLMProvider, ProcessingMode
 from translate_docs_ai.database import Database, Page, Stage, Status
 from translate_docs_ai.memory import DuckDBStore
-from translate_docs_ai.ocr import DeepInfraOCR, PyMuPDFExtractor
+from translate_docs_ai.ocr import DeepInfraOCR, DocxExtractor, PyMuPDFExtractor, TextExtractor
 from translate_docs_ai.styling import StyleExtractor
 from translate_docs_ai.terminology import (
     GlossaryDetector,
@@ -196,6 +196,10 @@ class TranslationPipeline:
         else:
             self.deepinfra_ocr = None
             self.deepinfra_fallback = None
+
+        # Direct text extractors (no OCR needed)
+        self.text_extractor = TextExtractor()
+        self.docx_extractor = DocxExtractor()
 
         # Determine if LLM is available based on provider
         # Claude Code doesn't need API key, OpenRouter does
@@ -375,7 +379,13 @@ class TranslationPipeline:
         }
 
     async def _node_ocr(self, state: PipelineState) -> dict[str, Any]:
-        """Extract text from document pages."""
+        """Extract text from document pages.
+
+        Routes to appropriate extractor based on file type:
+        - .md, .markdown, .txt: Direct text read (no OCR)
+        - .docx: Direct extraction via python-docx (no OCR)
+        - .pdf: OCR via PyMuPDF (native) or DeepInfra (scanned)
+        """
         from pathlib import Path
 
         from translate_docs_ai.ocr.base import OCRQuality
@@ -384,23 +394,35 @@ class TranslationPipeline:
         document_id = state["document_id"]
         ocr_results: dict[int, str] = {}
         errors: list[dict[str, Any]] = []
+        file_ext = doc_path.suffix.lower()
 
         try:
-            # Determine OCR method based on config
-            # If force_ocr is True, skip pymupdf entirely and use DeepInfra
-            use_native = False
-            if not self.config.force_ocr and self.pymupdf:
-                is_native = doc_path.suffix.lower() == ".pdf" and self.pymupdf.is_native_pdf(
-                    doc_path
-                )
-                use_native = is_native
-
-            ocr_method = "native" if use_native else "deepinfra"
+            # Determine extraction method based on file type
+            # Text and markdown files: direct read (no OCR needed)
+            if file_ext in {".md", ".markdown", ".txt"}:
+                extraction_method = "text_direct"
+                extractor = self.text_extractor
+            # DOCX files: direct extraction via python-docx (no OCR needed)
+            elif file_ext in {".docx", ".doc"}:
+                extraction_method = "docx_direct"
+                extractor = self.docx_extractor
+            # PDF files: use OCR pipeline
+            elif file_ext == ".pdf":
+                # Determine OCR method based on config
+                # If force_ocr is True, skip pymupdf entirely and use DeepInfra
+                use_native = False
+                if not self.config.force_ocr and self.pymupdf:
+                    is_native = self.pymupdf.is_native_pdf(doc_path)
+                    use_native = is_native
+                extraction_method = "native" if use_native else "deepinfra"
+                extractor = None  # Will use specific logic below
+            else:
+                raise ValueError(f"Unsupported file type: {file_ext}")
 
             self.db.log(
                 level="INFO",
                 stage="ocr",
-                message=f"Using OCR method: {ocr_method} (force_ocr={self.config.force_ocr})",
+                message=f"Using extraction method: {extraction_method} for {file_ext} file",
                 document_id=document_id,
             )
 
@@ -411,9 +433,14 @@ class TranslationPipeline:
             total_pages = state["total_pages"]
             for page_num in range(total_pages):
                 # Report progress for each page
+                stage_display = (
+                    "Extracting text"
+                    if extraction_method in {"text_direct", "docx_direct"}
+                    else "Extracting text (OCR)"
+                )
                 self._report_progress(
                     stage="ocr",
-                    stage_display="Extracting text (OCR)",
+                    stage_display=stage_display,
                     page_current=page_num + 1,
                     page_total=total_pages,
                 )
@@ -421,13 +448,17 @@ class TranslationPipeline:
                 # Check if page already exists with content (for resume)
                 existing_page = existing_pages.get(page_num)
                 if existing_page and existing_page.original_content:
-                    # Page already OCR'd, skip and use existing content
+                    # Page already extracted, skip and use existing content
                     ocr_results[page_num] = existing_page.original_content
                     pages_skipped += 1
                     continue
 
                 try:
-                    if use_native and self.pymupdf:
+                    # Route to appropriate extractor
+                    if extraction_method in {"text_direct", "docx_direct"}:
+                        # Direct text extraction (no OCR)
+                        result = await extractor.extract_page(doc_path, page_num)
+                    elif extraction_method == "native" and self.pymupdf:
                         # Use native PDF text extraction
                         result = await self.pymupdf.extract_page(doc_path, page_num)
                     elif self.deepinfra_ocr:
@@ -471,20 +502,21 @@ class TranslationPipeline:
                     )
 
             # Log completion
-            ocr_msg = (
-                f"OCR completed: {len(ocr_results)}/{state['total_pages']} pages using {ocr_method}"
+            extraction_msg = (
+                f"Text extraction completed: {len(ocr_results)}/{state['total_pages']} pages "
+                f"using {extraction_method}"
             )
             if pages_skipped > 0:
-                ocr_msg += f" ({pages_skipped} pages resumed from previous run)"
+                extraction_msg += f" ({pages_skipped} pages resumed from previous run)"
             self.db.log(
                 level="INFO",
                 stage="ocr",
-                message=ocr_msg,
+                message=extraction_msg,
                 document_id=document_id,
             )
 
-            # Extract and store styling information from PDF
-            if doc_path.suffix.lower() == ".pdf":
+            # Extract and store styling information from PDF only
+            if file_ext == ".pdf":
                 try:
                     self._report_progress(
                         stage="ocr",
@@ -515,7 +547,7 @@ class TranslationPipeline:
                 document_id=document_id,
                 stage=Stage.OCR,
                 page_number=state["total_pages"] - 1,
-                state_data={"ocr_method": ocr_method},
+                state_data={"extraction_method": extraction_method},
             )
 
             return {
